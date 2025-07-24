@@ -1,7 +1,8 @@
+import EmberObject from "@ember/object";
 import Pretender from "pretender";
+import getURL from "discourse/lib/get-url";
+import { cloneJSON } from "discourse/lib/object";
 import User from "discourse/models/user";
-import getURL from "discourse-common/lib/get-url";
-import { cloneJSON } from "discourse-common/lib/object";
 
 export function parsePostData(query) {
   const result = {};
@@ -76,6 +77,10 @@ export function applyDefaultHandlers(pretender) {
   });
 
   pretender.get("/admin/plugins", () => response({ plugins: [] }));
+
+  pretender.get("/admin/search/all.json", () => {
+    return response(cloneJSON(fixturesByUrl["/admin/search/all.json"]));
+  });
 
   pretender.get("/composer_messages", () =>
     response({ composer_messages: [] })
@@ -259,6 +264,7 @@ export function applyDefaultHandlers(pretender) {
             name: "bug",
             color: "e9dd00",
             text_color: "000000",
+            style_type: "square",
             slug: "bug",
             read_restricted: false,
             parent_category_id: null,
@@ -408,18 +414,18 @@ export function applyDefaultHandlers(pretender) {
 
   pretender.get("/search", (request) => {
     if (
-      request.queryParams.q === "discourse" ||
-      request.queryParams.q === "discourse order:latest" ||
-      request.queryParams.q === "discourse order:likes"
+      request.queryParams.q === "consectetur" ||
+      request.queryParams.q === "consectetur order:latest" ||
+      request.queryParams.q === "consectetur order:likes"
     ) {
       return response(fixturesByUrl["/search.json"]);
-    } else if (request.queryParams.q === "discourse visited") {
+    } else if (request.queryParams.q === "consectetur visited") {
       const obj = JSON.parse(JSON.stringify(fixturesByUrl["/search.json"]));
       obj.topics.firstObject.last_read_post_number = 1;
       return response(obj);
     } else if (
-      request.queryParams.q === "discourse in:personal" ||
-      request.queryParams.q === "discourse in:messages"
+      request.queryParams.q === "consectetur in:personal" ||
+      request.queryParams.q === "consectetur in:messages"
     ) {
       const obj = JSON.parse(JSON.stringify(fixturesByUrl["/search.json"]));
       obj.topics.firstObject.archetype = "private_message";
@@ -491,9 +497,43 @@ export function applyDefaultHandlers(pretender) {
     return response([{ id: 1234, cooked: "wat" }]);
   });
 
-  pretender.get("/categories_and_latest", () =>
-    response(fixturesByUrl["/categories_and_latest.json"])
-  );
+  pretender.get("/categories.json", (request) => {
+    const data = cloneJSON(fixturesByUrl["/categories.json"]);
+
+    // replace categories list if parent_category_id filter is present
+    if (request.queryParams.parent_category_id) {
+      const parentCategoryId = parseInt(
+        request.queryParams.parent_category_id,
+        10
+      );
+      data.category_list.categories = fixturesByUrl[
+        "site.json"
+      ].site.categories.filter(
+        (c) => c.parent_category_id === parentCategoryId
+      );
+    }
+
+    return response(data);
+  });
+
+  pretender.get("/categories_and_latest", (request) => {
+    const data = cloneJSON(fixturesByUrl["/categories_and_latest.json"]);
+
+    // replace categories list if parent_category_id filter is present
+    if (request.queryParams.parent_category_id) {
+      const parentCategoryId = parseInt(
+        request.queryParams.parent_category_id,
+        10
+      );
+      data.category_list.categories = fixturesByUrl[
+        "site.json"
+      ].site.categories.filter(
+        (c) => c.parent_category_id === parentCategoryId
+      );
+    }
+
+    return response(data);
+  });
 
   pretender.get("/c/bug/find_by_slug.json", () =>
     response(fixturesByUrl["/c/1/show.json"])
@@ -527,6 +567,26 @@ export function applyDefaultHandlers(pretender) {
   pretender.post("/categories", () =>
     response(fixturesByUrl["/c/11/show.json"])
   );
+
+  pretender.get("/categories/find", () => {
+    return response({
+      categories: fixturesByUrl["site.json"].site.categories,
+    });
+  });
+
+  pretender.post("/categories/search", (request) => {
+    const data = parsePostData(request.requestBody);
+    if (data.include_ancestors) {
+      return response({
+        categories: fixturesByUrl["site.json"].site.categories,
+        ancestors: fixturesByUrl["site.json"].site.categories,
+      });
+    } else {
+      return response({
+        categories: fixturesByUrl["site.json"].site.categories,
+      });
+    }
+  });
 
   pretender.get("/c/testing/find_by_slug.json", () =>
     response(fixturesByUrl["/c/11/show.json"])
@@ -972,9 +1032,24 @@ export function applyDefaultHandlers(pretender) {
   pretender.delete("/admin/customize/watched_words/:id.json", success);
 
   pretender.post("/admin/customize/watched_words.json", (request) => {
-    const result = parsePostData(request.requestBody);
-    result.id = new Date().getTime();
-    result.case_sensitive = result.case_sensitive === "true";
+    const requestData = parsePostData(request.requestBody);
+
+    const result = cloneJSON(
+      fixturesByUrl["/admin/customize/watched_words.json"]
+    );
+    result.words = [];
+
+    const words = requestData.words || requestData["words[]"];
+    words.forEach((word, index) => {
+      result.words[index] = EmberObject.create({
+        id: new Date().getTime(),
+        word,
+        action: requestData.action_key,
+        replacement: requestData.replacement,
+        case_sensitive: requestData.case_sensitive === "true",
+      });
+    });
+
     return response(200, result);
   });
 
@@ -1301,6 +1376,10 @@ export function applyDefaultHandlers(pretender) {
 
   pretender.get("/session/passkey/challenge.json", () =>
     response({ challenge: "123" })
+  );
+
+  pretender.get("/export_csv/latest_user_archive/:id.json", () =>
+    response(null)
   );
 }
 

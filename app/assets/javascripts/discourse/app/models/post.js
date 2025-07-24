@@ -1,25 +1,70 @@
+import { cached, tracked } from "@glimmer/tracking";
 import EmberObject, { get } from "@ember/object";
-import { and, equal, not, or } from "@ember/object/computed";
+import { alias, and, equal, not, or } from "@ember/object/computed";
+import { service } from "@ember/service";
 import { isEmpty } from "@ember/utils";
 import { Promise } from "rsvp";
 import { resolveShareUrl } from "discourse/helpers/share-url";
 import { ajax } from "discourse/lib/ajax";
 import { popupAjaxError } from "discourse/lib/ajax-error";
 import { propertyEqual } from "discourse/lib/computed";
+import discourseComputed from "discourse/lib/decorators";
 import { cook } from "discourse/lib/text";
 import { fancyTitle } from "discourse/lib/topic-fancy-title";
+import { defineTrackedProperty } from "discourse/lib/tracked-tools";
 import { userPath } from "discourse/lib/url";
 import { postUrl } from "discourse/lib/utilities";
 import ActionSummary from "discourse/models/action-summary";
+import Badge from "discourse/models/badge";
 import Composer from "discourse/models/composer";
 import RestModel from "discourse/models/rest";
 import Site from "discourse/models/site";
 import User from "discourse/models/user";
-import discourseComputed from "discourse-common/utils/decorators";
-import I18n from "discourse-i18n";
+import { i18n } from "discourse-i18n";
+
+const pluginTrackedProperties = new Set();
+const trackedPropertiesForPostUpdate = new Set();
+
+/**
+ * @internal
+ * Adds a tracked property to the post model.
+ *
+ * Intended to be used only in the plugin API.
+ *
+ * @param {string} propertyKey - The key of the property to track.
+ */
+export function _addTrackedPostProperty(propertyKey) {
+  pluginTrackedProperties.add(propertyKey);
+}
+
+/**
+ * Clears all tracked properties added using the API
+ *
+ * USE ONLY FOR TESTING PURPOSES.
+ */
+export function clearAddedTrackedPostProperties() {
+  pluginTrackedProperties.clear();
+}
+
+/**
+ * Decorator to mark a property as post property as tracked.
+ *
+ * It extends the standard Ember @tracked behavior to also keep track of the fields
+ * that need to be copied when using `post.updateFromPost`.
+ *
+ * @param {Object} target - The target object.
+ * @param {string} propertyKey - The key of the property to track.
+ * @param {PropertyDescriptor} descriptor - The property descriptor.
+ * @returns {PropertyDescriptor} The updated property descriptor.
+ */
+function trackedPostProperty(target, propertyKey, descriptor) {
+  trackedPropertiesForPostUpdate.add(propertyKey);
+  return tracked(target, propertyKey, descriptor);
+}
 
 export default class Post extends RestModel {
   static munge(json) {
+    json.likeAction ??= null;
     if (json.actions_summary) {
       const lookup = EmberObject.create();
 
@@ -74,9 +119,10 @@ export default class Post extends RestModel {
   }
 
   static loadRevision(postId, version) {
-    return ajax(`/posts/${postId}/revisions/${version}.json`).then((result) =>
-      EmberObject.create(result)
-    );
+    return ajax(`/posts/${postId}/revisions/${version}.json`).then((result) => {
+      result.categories?.forEach((c) => Site.current().updateCategory(c));
+      return EmberObject.create(result);
+    });
   }
 
   static hideRevision(postId, version) {
@@ -101,25 +147,99 @@ export default class Post extends RestModel {
     return ajax(`/posts/${postId}/raw-email.json`);
   }
 
-  customShare = null;
+  @service currentUser;
+  @service site;
 
+  @tracked customShare = null;
+
+  // Use @trackedPostProperty here instead of Glimmer's @tracked because we need to know which properties are tracked
+  // in order to correctly update the post in the updateFromPost method. Currently this is not possible using only
+  // the standard tracked method because these properties are added to the class prototype and are not enumarated by
+  // object.keys().
+  // See https://github.com/emberjs/ember.js/issues/18220
+  @trackedPostProperty action_code;
+  @trackedPostProperty action_code_path;
+  @trackedPostProperty action_code_who;
+  @trackedPostProperty actions_summary;
+  @trackedPostProperty admin;
+  @trackedPostProperty badges_granted;
+  @trackedPostProperty bookmarked;
+  @trackedPostProperty can_delete;
+  @trackedPostProperty can_edit;
+  @trackedPostProperty can_permanently_delete;
+  @trackedPostProperty can_recover;
+  @trackedPostProperty can_see_hidden_post;
+  @trackedPostProperty can_view_edit_history;
+  @trackedPostProperty cooked;
+  @trackedPostProperty cooked_hidden;
+  @trackedPostProperty created_at;
+  @trackedPostProperty deleted_at;
+  @trackedPostProperty deleted_by;
+  @trackedPostProperty excerpt;
+  @trackedPostProperty expandedExcerpt;
+  @trackedPostProperty group_moderator;
+  @trackedPostProperty hidden;
+  @trackedPostProperty id;
+  @trackedPostProperty is_auto_generated;
+  @trackedPostProperty last_wiki_edit;
+  @trackedPostProperty likeAction;
+  @trackedPostProperty link_counts;
+  @trackedPostProperty locked;
+  @trackedPostProperty moderator;
+  @trackedPostProperty name;
+  @trackedPostProperty notice;
+  @trackedPostProperty notice_created_by_user;
+  @trackedPostProperty post_number;
+  @trackedPostProperty post_type;
+  @trackedPostProperty primary_group_name;
+  @trackedPostProperty quoted;
+  @trackedPostProperty read;
+  @trackedPostProperty reply_count;
+  @trackedPostProperty reply_to_user;
+  @trackedPostProperty staff;
+  @trackedPostProperty staged;
+  @trackedPostProperty title_is_group;
+  @trackedPostProperty topic;
+  @trackedPostProperty topic_id;
+  @trackedPostProperty trust_level;
+  @trackedPostProperty updated_at;
+  @trackedPostProperty user;
+  @trackedPostProperty user_deleted;
+  @trackedPostProperty user_id;
+  @trackedPostProperty user_suspended;
+  @trackedPostProperty user_title;
+  @trackedPostProperty username;
+  @trackedPostProperty version;
+  @trackedPostProperty via_email;
+  @trackedPostProperty wiki;
+  @trackedPostProperty yours;
+  @trackedPostProperty user_custom_fields;
+  @trackedPostProperty has_post_localizations;
+  @trackedPostProperty post_localizations;
+
+  @alias("can_edit") canEdit; // for compatibility with existing code
   @equal("trust_level", 0) new_user;
   @equal("post_number", 1) firstPost;
-  @or("deleted_at", "deletedViaTopic") deleted;
+  @and("firstPost", "topic.deleted_at") deletedViaTopic; // mark fist post as deleted if topic was deleted
+  @or("deleted_at", "deletedViaTopic") deleted; // post is either highlighted as deleted or hidden/removed from the post stream
   @not("deleted") notDeleted;
+  @or("deleted_at", "user_deleted") recoverable; // post or content still can be recovered
   @propertyEqual("topic.details.created_by.id", "user_id") topicOwner;
+  @alias("topic.details.created_by.id") topicCreatedById;
+  @alias("deletedBy") postDeletedBy; // TODO (glimmer-post-stream): check if this alias can be removed after removing the widget code
+  @alias("deletedAt") postDeletedAt; // TODO (glimmer-post-stream): check if this alias can be removed after removing the widget code
 
-  // Posts can show up as deleted if the topic is deleted
-  @and("firstPost", "topic.deleted_at") deletedViaTopic;
+  constructor() {
+    super(...arguments);
 
-  @discourseComputed("url", "customShare")
-  shareUrl(url) {
-    if (this.customShare) {
-      return this.customShare;
-    }
+    // adds tracked properties defined by plugin to the instance
+    pluginTrackedProperties.forEach((propertyKey) => {
+      defineTrackedProperty(this, propertyKey);
+    });
+  }
 
-    const user = User.current();
-    return resolveShareUrl(url, user);
+  get shareUrl() {
+    return this.customShare || resolveShareUrl(this.url, this.currentUser);
   }
 
   @discourseComputed("name", "username")
@@ -127,14 +247,12 @@ export default class Post extends RestModel {
     return name && name !== username && this.siteSettings.display_name_on_posts;
   }
 
-  @discourseComputed("firstPost", "deleted_by", "topic.deleted_by")
-  postDeletedBy(firstPost, deletedBy, topicDeletedBy) {
-    return firstPost ? topicDeletedBy : deletedBy;
+  get deletedBy() {
+    return this.firstPost ? this.topic?.deleted_by : this.deleted_by;
   }
 
-  @discourseComputed("firstPost", "deleted_at", "topic.deleted_at")
-  postDeletedAt(firstPost, deletedAt, topicDeletedAt) {
-    return firstPost ? topicDeletedAt : deletedAt;
+  get deletedAt() {
+    return this.firstPost ? this.topic?.deleted_at : this.deleted_at;
   }
 
   @discourseComputed("post_number", "topic_id", "topic.slug")
@@ -162,17 +280,19 @@ export default class Post extends RestModel {
     data[field] = value;
 
     return ajax(`/posts/${this.id}/${field}`, { type: "PUT", data })
-      .then(() => this.set(field, value))
+      .then((response) => {
+        this.set(field, value);
+        return response;
+      })
       .catch(popupAjaxError);
   }
 
-  @discourseComputed("link_counts.@each.internal")
-  internalLinks() {
+  get internalLinks() {
     if (isEmpty(this.link_counts)) {
       return null;
     }
 
-    return this.link_counts.filterBy("internal").filterBy("title");
+    return this.link_counts.filter((link) => link.internal && link.title);
   }
 
   @discourseComputed("actions_summary.@each.can_act")
@@ -199,6 +319,127 @@ export default class Post extends RestModel {
   @discourseComputed("topic_title_headline")
   topicTitleHeadline(title) {
     return fancyTitle(title, this.siteSettings.support_mixed_text_direction);
+  }
+
+  get canBookmark() {
+    return !!this.currentUser;
+  }
+
+  get canDelete() {
+    return (
+      this.can_delete &&
+      !this.deleted_at &&
+      this.currentUser &&
+      (this.currentUser.staff || !this.user_deleted)
+    );
+  }
+
+  get canDeleteTopic() {
+    return this.firstPost && !this.deleted && this.topic.details.can_delete;
+  }
+
+  get canEditStaffNotes() {
+    return !!this.topic.details.can_edit_staff_notes;
+  }
+
+  get canFlag() {
+    return !this.topic.deleted && !isEmpty(this.flagsAvailable);
+  }
+
+  get canManage() {
+    return this.currentUser?.canManageTopic;
+  }
+
+  get canPermanentlyDelete() {
+    return (
+      this.deleted &&
+      (this.firstPost
+        ? this.topic.details.can_permanently_delete
+        : this.can_permanently_delete)
+    );
+  }
+
+  get canPublishPage() {
+    return this.firstPost && !!this.topic.details.can_publish_page;
+  }
+
+  get canRecoverTopic() {
+    return this.firstPost && this.deleted && this.topic.details.can_recover;
+  }
+
+  get isRecoveringTopic() {
+    return this.firstPost && !this.deleted && this.topic.details.can_recover;
+  }
+
+  get canRecover() {
+    return !this.canRecoverTopic && this.recoverable && this.can_recover;
+  }
+
+  get isRecovering() {
+    return !this.isRecoveringTopic && !this.recoverable && this.can_recover;
+  }
+
+  get canSplitMergeTopic() {
+    return !!this.topic?.details?.can_split_merge_topic;
+  }
+
+  get canToggleLike() {
+    return !!this.likeAction?.get("canToggle");
+  }
+
+  get filteredRepliesPostNumber() {
+    return this.topic.get("postStream.filterRepliesToPostNumber");
+  }
+
+  get hasReplies() {
+    return this.reply_count > 0;
+  }
+
+  get isWhisper() {
+    return this.post_type === this.site.post_types.whisper;
+  }
+
+  get isModeratorAction() {
+    return this.post_type === this.site.post_types.moderator_action;
+  }
+
+  get isSmallAction() {
+    return (
+      this.post_type === this.site.post_types.small_action ||
+      this.action_code === "split_topic"
+    );
+  }
+
+  get liked() {
+    return !!this.likeAction?.get("acted");
+  }
+
+  get likeCount() {
+    return this.likeAction?.get("count");
+  }
+
+  /**
+   * Show a "Flag to delete" message if not staff and you can't otherwise delete it.
+   */
+  get showFlagDelete() {
+    return (
+      !this.canDelete &&
+      this.yours &&
+      this.canFlag &&
+      this.currentUser &&
+      !this.currentUser.staff
+    );
+  }
+
+  get showLike() {
+    if (
+      !this.currentUser ||
+      (this.topic?.get("archived") && this.user_id !== this.currentUser.id)
+    ) {
+      return true;
+    }
+
+    return this.likeAction && (this.liked || this.canToggleLike);
   }
 
   afterUpdate(res) {
@@ -234,13 +475,9 @@ export default class Post extends RestModel {
   }
 
   // Expands the first post's content, if embedded and shortened.
-  expand() {
-    return ajax(`/posts/${this.id}/expand-embed`).then((post) => {
-      this.set(
-        "cooked",
-        `<section class="expanded-embed">${post.cooked}</section>`
-      );
-    });
+  async expand() {
+    const post = await ajax(`/posts/${this.id}/expand-embed`);
+    this.cooked = `<section class="expanded-embed">${post.cooked}</section>`;
   }
 
   // Recover a deleted post
@@ -278,9 +515,9 @@ export default class Post extends RestModel {
   }
 
   /**
-    Changes the state of the post to be deleted. Does not call the server, that should be
-    done elsewhere.
-  **/
+   Changes the state of the post to be deleted. Does not call the server, that should be
+   done elsewhere.
+   **/
   setDeletedState(deletedBy) {
     let promise;
     this.set("oldCooked", this.cooked);
@@ -300,7 +537,7 @@ export default class Post extends RestModel {
         this.post_number === 1
           ? "topic.deleted_by_author_simple"
           : "post.deleted_by_author_simple";
-      promise = cook(I18n.t(key)).then((cooked) => {
+      promise = cook(i18n(key)).then((cooked) => {
         this.setProperties({
           cooked,
           can_delete: false,
@@ -317,10 +554,10 @@ export default class Post extends RestModel {
   }
 
   /**
-    Changes the state of the post to NOT be deleted. Does not call the server.
-    This can only be called after setDeletedState was called, but the delete
-    failed on the server.
-  **/
+   Changes the state of the post to NOT be deleted. Does not call the server.
+   This can only be called after setDeletedState was called, but the delete
+   failed on the server.
+   **/
   undoDeleteState() {
     if (this.oldCooked) {
       this.setProperties({
@@ -345,11 +582,15 @@ export default class Post extends RestModel {
   }
 
   /**
-    Updates a post from another's attributes. This will normally happen when a post is loading but
-    is already found in an identity map.
-  **/
+   * Updates a post from another's attributes. This will normally happen when a post is loading but
+   * is already found in an identity map.
+   **/
   updateFromPost(otherPost) {
-    Object.keys(otherPost).forEach((key) => {
+    [
+      ...Object.keys(otherPost),
+      ...trackedPropertiesForPostUpdate,
+      ...pluginTrackedProperties,
+    ].forEach((key) => {
       let value = otherPost[key],
         oldValue = this[key];
 
@@ -367,6 +608,10 @@ export default class Post extends RestModel {
           skip =
             value.username === oldValue.username ||
             get(value, "username") === get(oldValue, "username");
+        } else if (key === "topic" && !value && oldValue) {
+          // if `topic` is already set in the new instance we don't want to overwrite it with null, because the old
+          // instance wasn't fully initialized yet.
+          skip = true;
         }
 
         if (!skip) {
@@ -406,6 +651,7 @@ export default class Post extends RestModel {
       target: "post",
       targetId: this.id,
     });
+    // TODO (glimmer-post-stream) the Glimmer Post Stream does not listen to this event
     this.appEvents.trigger("post-stream:refresh", { id: this.id });
   }
 
@@ -437,7 +683,7 @@ export default class Post extends RestModel {
   }
 
   updateLikeCount(count, userId, eventType) {
-    let ownAction = User.current()?.id === userId;
+    let ownAction = this.currentUser?.id === userId;
     let ownLike = ownAction && eventType === "liked";
     let current_actions_summary = this.get("actions_summary");
     let likeActionID = Site.current().post_action_types.find(
@@ -478,5 +724,52 @@ export default class Post extends RestModel {
 
   get topicNotificationLevel() {
     return this.topic.details.notification_level;
+  }
+
+  get userBadges() {
+    if (!this.topic?.user_badges) {
+      return;
+    }
+    const badgeIds = this.topic.user_badges.users[this.user_id]?.badge_ids;
+    if (badgeIds) {
+      return badgeIds.map((badgeId) => this.topic.user_badges.badges[badgeId]);
+    }
+  }
+
+  @cached
+  get badgesGranted() {
+    return this.badges_granted?.map((json) => {
+      const badges = Badge.createFromJson(json);
+      return Array.isArray(badges) ? badges[0] : badges;
+    });
+  }
+
+  get requestedGroupName() {
+    return this.post_number === 1 ? this.topic?.requested_group_name : null;
+  }
+
+  get expandablePost() {
+    return this.post_number === 1 && !!this.topic?.expandable_first_post;
+  }
+
+  get topicUrl() {
+    return this.topic?.url;
+  }
+
+  @cached
+  get actionsSummary() {
+    return this.actions_summary
+      ?.filter((postAction) => {
+        return postAction.actionType.name_key !== "like" && postAction.acted;
+      })
+      ?.map((postAction) => {
+        return {
+          id: postAction.id,
+          postId: this.id,
+          action: postAction.actionType.name_key,
+          canUndo: postAction.can_undo,
+          description: postAction.actionType.translatedDescription,
+        };
+      });
   }
 }

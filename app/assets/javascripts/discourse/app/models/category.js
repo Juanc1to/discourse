@@ -1,19 +1,22 @@
+import { tracked } from "@glimmer/tracking";
 import { warn } from "@ember/debug";
-import { get } from "@ember/object";
-import { on } from "@ember-decorators/object";
+import { computed, get } from "@ember/object";
+import { service } from "@ember/service";
 import { ajax } from "discourse/lib/ajax";
+import discourseComputed from "discourse/lib/decorators";
+import { getOwnerWithFallback } from "discourse/lib/get-owner";
+import getURL from "discourse/lib/get-url";
+import { MultiCache } from "discourse/lib/multi-cache";
 import { NotificationLevels } from "discourse/lib/notification-levels";
+import { applyValueTransformer } from "discourse/lib/transformer";
 import PermissionType from "discourse/models/permission-type";
 import RestModel from "discourse/models/rest";
 import Site from "discourse/models/site";
-import User from "discourse/models/user";
-import { getOwnerWithFallback } from "discourse-common/lib/get-owner";
-import getURL from "discourse-common/lib/get-url";
-import discourseComputed from "discourse-common/utils/decorators";
-import { MultiCache } from "discourse-common/utils/multi-cache";
+import Topic from "discourse/models/topic";
 
 const STAFF_GROUP_NAME = "staff";
 const CATEGORY_ASYNC_SEARCH_CACHE = {};
+const CATEGORY_ASYNC_HIERARCHICAL_SEARCH_CACHE = {};
 
 export default class Category extends RestModel {
   // Sort subcategories directly under parents
@@ -102,7 +105,14 @@ export default class Category extends RestModel {
     if (!id) {
       return;
     }
-    return Category._idMap()[id];
+
+    if (typeof id === "string") {
+      // eslint-disable-next-line no-console
+      console.warn("Category.findById called with a string ID");
+      id = parseInt(id, 10);
+    }
+
+    return Category._idMap().get(id);
   }
 
   static findByIds(ids = []) {
@@ -150,6 +160,10 @@ export default class Category extends RestModel {
     return categories;
   }
 
+  static async asyncFindById(id) {
+    return (await Category.asyncFindByIds([id]))[0];
+  }
+
   static findBySlugAndParent(slug, parentCategory) {
     if (this.slugEncoded()) {
       slug = encodeURI(slug);
@@ -174,6 +188,25 @@ export default class Category extends RestModel {
     }
 
     return category;
+  }
+
+  static async asyncFindBySlugPath(slugPath, opts = {}) {
+    const data = { slug_path: slugPath };
+    if (opts.includePermissions) {
+      data.include_permissions = true;
+    }
+
+    const result = await ajax("/categories/find", { data });
+
+    const categories = result["categories"].map((category) => {
+      category = Site.current().updateCategory(category);
+      if (opts.includePermissions) {
+        category.setupGroupsAndPermissions();
+      }
+      return category;
+    });
+
+    return categories[categories.length - 1];
   }
 
   static async asyncFindBySlugPathWithID(slugPathWithID) {
@@ -355,6 +388,32 @@ export default class Category extends RestModel {
     return data.sortBy("read_restricted");
   }
 
+  static async asyncHierarchicalSearch(term, opts) {
+    opts ||= {};
+
+    const data = {
+      term,
+      parent_category_id: opts.parentCategoryId,
+      limit: opts.limit,
+      only: opts.only,
+      except: opts.except,
+      page: opts.page,
+      offset: opts.offset,
+      include_uncategorized: opts.includeUncategorized,
+    };
+
+    const result = (CATEGORY_ASYNC_HIERARCHICAL_SEARCH_CACHE[
+      JSON.stringify(data)
+    ] ||= await ajax("/categories/hierarchical_search", {
+      method: "GET",
+      data,
+    }));
+
+    return result["categories"].map((category) =>
+      Site.current().updateCategory(category)
+    );
+  }
+
   static async asyncSearch(term, opts) {
     opts ||= {};
 
@@ -368,10 +427,11 @@ export default class Category extends RestModel {
       include_ancestors: opts.includeAncestors,
       prioritized_category_id: opts.prioritizedCategoryId,
       limit: opts.limit,
+      page: opts.page,
     };
 
     const result = (CATEGORY_ASYNC_SEARCH_CACHE[JSON.stringify(data)] ||=
-      await ajax("/categories/search", { data }));
+      await ajax("/categories/search", { method: "POST", data }));
 
     if (opts.includeAncestors) {
       return {
@@ -381,6 +441,7 @@ export default class Category extends RestModel {
         categories: result["categories"].map((category) =>
           Site.current().updateCategory(category)
         ),
+        categoriesCount: result["categories_count"],
       };
     } else {
       return result["categories"].map((category) =>
@@ -389,27 +450,86 @@ export default class Category extends RestModel {
     }
   }
 
+  @service currentUser;
+
+  @tracked color;
+  @tracked styleType = this.style_type;
+  @tracked emoji;
+  @tracked icon;
+  @tracked localizations = this.category_localizations;
   permissions = null;
 
-  @on("init")
+  init() {
+    super.init(...arguments);
+    this.setupGroupsAndPermissions();
+  }
+
   setupGroupsAndPermissions() {
-    const availableGroups = this.available_groups;
-    if (!availableGroups) {
+    if (!this.available_groups) {
       return;
     }
-    this.set("availableGroups", availableGroups);
 
-    const groupPermissions = this.group_permissions;
+    this.set("availableGroups", this.available_groups);
 
-    if (groupPermissions) {
+    if (this.group_permissions) {
       this.set(
         "permissions",
-        groupPermissions.map((elem) => {
-          availableGroups.removeObject(elem.group_name);
+        this.group_permissions.map((elem) => {
+          this.available_groups.removeObject(elem.group_name);
           return elem;
         })
       );
     }
+  }
+
+  get descriptionText() {
+    return applyValueTransformer(
+      "category-description-text",
+      this.get("description_text"),
+      {
+        category: this,
+      }
+    );
+  }
+
+  get displayName() {
+    return applyValueTransformer("category-display-name", this.get("name"), {
+      category: this,
+    });
+  }
+
+  get textColor() {
+    return applyValueTransformer(
+      "category-text-color",
+      this.get("text_color"),
+      {
+        category: this,
+      }
+    );
+  }
+
+  @computed("parent_category_id", "site.categories.[]")
+  get parentCategory() {
+    if (this.parent_category_id) {
+      return Category.findById(this.parent_category_id);
+    }
+  }
+
+  set parentCategory(newParentCategory) {
+    this.set("parent_category_id", newParentCategory?.id);
+  }
+
+  get subcategories() {
+    return this.site.categoriesByParentId.get(this.id) || [];
+  }
+
+  get unloadedSubcategoryCount() {
+    return this.subcategory_count - this.subcategories.length;
+  }
+
+  @computed("subcategory_list")
+  get serializedSubcategories() {
+    return this.subcategory_list?.map((c) => Category.create(c));
   }
 
   @discourseComputed("required_tag_groups", "minimum_required_tags")
@@ -443,6 +563,25 @@ export default class Category extends RestModel {
   @discourseComputed("parentCategory.ancestors")
   ancestors(parentAncestors) {
     return [...(parentAncestors || []), this];
+  }
+
+  @discourseComputed("parentCategory", "parentCategory.predecessors")
+  predecessors(parentCategory, parentPredecessors) {
+    if (parentCategory) {
+      return [parentCategory, ...parentPredecessors];
+    } else {
+      return [];
+    }
+  }
+
+  get descendants() {
+    const descendants = [this];
+    for (let i = 0; i < descendants.length; i++) {
+      if (descendants[i].subcategories) {
+        descendants.push(...descendants[i].subcategories);
+      }
+    }
+    return descendants;
   }
 
   @discourseComputed("parentCategory.level")
@@ -587,6 +726,8 @@ export default class Category extends RestModel {
     const id = this.id;
     const url = id ? `/categories/${id}` : "/categories";
 
+    this.styleType = this.style_type;
+
     return ajax(url, {
       contentType: "application/json",
       data: JSON.stringify({
@@ -635,9 +776,15 @@ export default class Category extends RestModel {
           "navigate_to_first_post_after_read"
         ),
         search_priority: this.search_priority,
-        reviewable_by_group_name: this.reviewable_by_group_name,
+        moderating_group_ids: this.moderating_group_ids,
         read_only_banner: this.read_only_banner,
         default_list_filter: this.default_list_filter,
+        style_type: this.style_type,
+        emoji: this.emoji,
+        icon: this.icon,
+        ...(this.siteSettings.content_localization_enabled && {
+          category_localizations: this.localizations,
+        }),
       }),
       type: id ? "PUT" : "POST",
     });
@@ -692,14 +839,16 @@ export default class Category extends RestModel {
   @discourseComputed("topics")
   featuredTopics(topics) {
     if (topics && topics.length) {
-      return topics.slice(0, this.num_featured_topics || 2);
+      return topics
+        .slice(0, this.num_featured_topics || 2)
+        .map((t) => Topic.create(t));
     }
   }
 
   setNotification(notification_level) {
-    User.currentProp(
+    this.currentUser.set(
       "muted_category_ids",
-      User.current().calculateMutedIds(
+      this.currentUser.calculateMutedIds(
         notification_level,
         this.id,
         "muted_category_ids"
@@ -709,7 +858,7 @@ export default class Category extends RestModel {
     const url = `/category/${this.id}/notifications`;
     return ajax(url, { data: { notification_level }, type: "POST" }).then(
       (data) => {
-        User.current().set(
+        this.currentUser.set(
           "indirectly_muted_category_ids",
           data.indirectly_muted_category_ids
         );

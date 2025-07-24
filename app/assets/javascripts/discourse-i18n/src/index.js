@@ -4,6 +4,8 @@ if (window.I18n) {
   );
 }
 
+import * as Cardinals from "make-plural/cardinals";
+
 // The placeholder format. Accepts `{{placeholder}}` and `%{placeholder}`.
 const PLACEHOLDER = /(?:\{\{|%\{)(.*?)(?:\}\}?)/gm;
 const SEPARATOR = ".";
@@ -13,21 +15,22 @@ export class I18n {
   defaultLocale = "en";
 
   // Set current locale to null
-  local = null;
+  locale = null;
   fallbackLocale = null;
   translations = null;
   extras = null;
   noFallbacks = false;
   testing = false;
+  verbose = false;
+  verboseIndicies = new Map();
 
-  // Set default pluralization rule
-  pluralizationRules = {
-    en(n) {
-      return n === 0 ? ["zero", "none", "other"] : n === 1 ? "one" : "other";
-    },
+  pluralizationRules = Cardinals;
+
+  translate = (scope, options) => {
+    return this.verbose
+      ? this._verboseTranslate(scope, options)
+      : this._translate(scope, options);
   };
-
-  translate = (scope, options) => this._translate(scope, options);
 
   // shortcut
   t = this.translate;
@@ -36,26 +39,20 @@ export class I18n {
     return this.locale || this.defaultLocale;
   }
 
+  get currentBcp47Locale() {
+    return this.currentLocale().replace("_", "-");
+  }
+
+  get pluralizationNormalizedLocale() {
+    if (this.currentLocale() === "pt") {
+      return "pt_PT";
+    }
+    return this.currentLocale().replace(/[_-].*/, "");
+  }
+
   enableVerboseLocalization() {
-    let counter = 0;
-    let keys = {};
-
     this.noFallbacks = true;
-
-    this.t = this.translate = (scope, options) => {
-      let current = keys[scope];
-      if (!current) {
-        current = keys[scope] = ++counter;
-        let message = "Translation #" + current + ": " + scope;
-        if (options && Object.keys(options).length > 0) {
-          message += ", parameters: " + JSON.stringify(options);
-        }
-        // eslint-disable-next-line no-console
-        console.info(message);
-      }
-
-      return this._translate(scope, options) + " (#" + current + ")";
-    };
+    this.verbose = true;
   }
 
   enableVerboseLocalizationSession() {
@@ -64,31 +61,17 @@ export class I18n {
     return "Verbose localization is enabled. Close the browser tab to turn it off. Reload the page to see the translation keys.";
   }
 
+  disableVerboseLocalizationSession() {
+    sessionStorage.removeItem("verbose_localization");
+    return "Verbose localization disabled. Reload the page.";
+  }
+
   _translate(scope, options) {
     options = this.prepareOptions(options);
     options.needsPluralization = typeof options.count === "number";
     options.ignoreMissing = !this.noFallbacks;
 
-    let translation = this.findTranslation(scope, options);
-
-    if (!this.noFallbacks) {
-      if (!translation && this.fallbackLocale) {
-        options.locale = this.fallbackLocale;
-        translation = this.findTranslation(scope, options);
-      }
-
-      options.ignoreMissing = false;
-
-      if (!translation && this.currentLocale() !== this.defaultLocale) {
-        options.locale = this.defaultLocale;
-        translation = this.findTranslation(scope, options);
-      }
-
-      if (!translation && this.currentLocale() !== "en") {
-        options.locale = "en";
-        translation = this.findTranslation(scope, options);
-      }
-    }
+    const translation = this.findTranslationWithFallback(scope, options);
 
     try {
       return this.interpolate(translation, options, scope);
@@ -192,7 +175,9 @@ export class I18n {
     options = this.prepareOptions(options);
     let count = options.count.toString();
 
-    let pluralizer = this.pluralizer(options.locale || this.currentLocale());
+    let pluralizer = this.pluralizer(
+      options.locale || this.pluralizationNormalizedLocale
+    );
     let key = pluralizer(Math.abs(count));
     let keys = typeof key === "object" && key instanceof Array ? key : [key];
     let message = this.findAndTranslateValidNode(keys, translation);
@@ -223,16 +208,19 @@ export class I18n {
 
   interpolate(message, options, scope) {
     options = this.prepareOptions(options);
-    let matches = message.match(PLACEHOLDER);
-    let placeholder, value, name;
+    let value;
 
-    if (!matches) {
+    if (message === undefined) {
+      // Throw a generic error to be caught in _translate()
+      throw new Error();
+    }
+
+    const placeholders = this.findPlaceholders(message);
+    if (placeholders.size === 0) {
       return message;
     }
 
-    for (let i = 0; (placeholder = matches[i]); i++) {
-      name = placeholder.replace(PLACEHOLDER, "$1");
-
+    for (const [name, placeholderValues] of placeholders) {
       if (typeof options[name] === "string") {
         // The dollar sign (`$`) is a special replace pattern, and `$&` inserts
         // the matched string. Thus dollars signs need to be escaped with the
@@ -243,22 +231,52 @@ export class I18n {
         value = options[name];
       }
 
-      if (!this.isValidNode(options, name)) {
-        value = "[missing " + placeholder + " value]";
+      for (const placeholder of placeholderValues) {
+        if (!this.isValidNode(options, name)) {
+          value = "[missing " + placeholder + " value]";
 
-        if (this.testing) {
-          throw new I18nMissingInterpolationArgument(`${scope}: ${value}`);
+          if (this.testing) {
+            throw new I18nMissingInterpolationArgument(`${scope}: ${value}`);
+          }
         }
+
+        let regex = new RegExp(
+          placeholder.replace(/\{/gm, "\\{").replace(/\}/gm, "\\}")
+        );
+
+        message = message.replace(regex, value);
       }
-
-      let regex = new RegExp(
-        placeholder.replace(/\{/gm, "\\{").replace(/\}/gm, "\\}")
-      );
-
-      message = message.replace(regex, value);
     }
 
     return message;
+  }
+
+  /**
+   * Extract the placeholders from the translated string before interpolation.
+   *
+   * @param {String} message The translated string.
+   *
+   * @returns {Map<String, Array<String>>} A Map keyed by the placeholder name, with the value set to
+   * how the placeholder appears in the string. If it appears multiple times, each instance will be
+   * recorded (eg, "foo" => ["%{foo}", "{{foo}}"]).
+   */
+  findPlaceholders(message) {
+    if (!message) {
+      return new Map();
+    }
+
+    const placeholders = message.match(PLACEHOLDER) || [];
+
+    const placeholderMap = new Map();
+
+    placeholders.forEach((placeholder) => {
+      const name = placeholder.replace(PLACEHOLDER, "$1");
+      const values = placeholderMap.get(name) ?? [];
+      values.push(placeholder);
+      placeholderMap.set(name, values);
+    });
+
+    return placeholderMap;
   }
 
   findTranslation(scope, options) {
@@ -266,6 +284,40 @@ export class I18n {
 
     if (translation && options.needsPluralization) {
       translation = this.pluralize(translation, scope, options);
+    }
+
+    return translation;
+  }
+
+  /**
+   * Given the current options (and if fallback is enabled), find the translation
+   * for the given scope.
+   *
+   * @param {String} scope The reference for the translatable string.
+   * @param {Object} options Custom options for this string.
+   *
+   * @returns {Array<String>|String} The translated string, or array of strings for pluralizable translations.
+   */
+  findTranslationWithFallback(scope, options) {
+    let translation = this.findTranslation(scope, options);
+
+    if (!this.noFallbacks) {
+      if (!translation && this.fallbackLocale) {
+        options.locale = this.fallbackLocale;
+        translation = this.findTranslation(scope, options);
+      }
+
+      options.ignoreMissing = false;
+
+      if (!translation && this.currentLocale() !== this.defaultLocale) {
+        options.locale = this.defaultLocale;
+        translation = this.findTranslation(scope, options);
+      }
+
+      if (!translation && this.currentLocale() !== "en") {
+        options.locale = "en";
+        translation = this.findTranslation(scope, options);
+      }
     }
 
     return translation;
@@ -371,6 +423,38 @@ export class I18n {
   isValidNode(obj, node) {
     return obj[node] !== null && obj[node] !== undefined;
   }
+
+  messageFormat(key, options) {
+    const message = this._mfMessages?.hasMessage(
+      key,
+      this._mfMessages.locale,
+      this._mfMessages.defaultLocale
+    );
+    if (!message) {
+      return "Missing Key: " + key;
+    }
+    try {
+      return this._mfMessages.get(key, options);
+    } catch (err) {
+      return err.message;
+    }
+  }
+
+  _verboseTranslate(scope, options) {
+    const result = this._translate(scope, options);
+    let i = this.verboseIndicies.get(scope);
+    if (!i) {
+      i = this.verboseIndicies.size + 1;
+      this.verboseIndicies.set(scope, i);
+    }
+    let message = `Translation #${i}: ${scope}`;
+    if (options && Object.keys(options).length > 0) {
+      message += `, parameters: ${JSON.stringify(options)}`;
+    }
+    // eslint-disable-next-line no-console
+    console.info(message);
+    return `${result} (#${i})`;
+  }
 }
 
 export class I18nMissingInterpolationArgument extends Error {
@@ -382,3 +466,5 @@ export class I18nMissingInterpolationArgument extends Error {
 
 // Export a default/global instance
 export default globalThis.I18n = new I18n();
+
+export const i18n = globalThis.I18n.t;

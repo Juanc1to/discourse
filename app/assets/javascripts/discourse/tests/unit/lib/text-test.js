@@ -1,4 +1,5 @@
 import { setupTest } from "ember-qunit";
+import { IMAGE_VERSION as v } from "pretty-text/emoji/version";
 import { module, test } from "qunit";
 import { cook, excerpt, parseAsync, parseMentions } from "discourse/lib/text";
 
@@ -19,13 +20,13 @@ module("Unit | Utility | text", function (hooks) {
     let cooked = await cook("Hello! :wave:");
     assert.strictEqual(
       await excerpt(cooked, 300),
-      'Hello! <img src="/images/emoji/twitter/wave.png?v=12" title=":wave:" class="emoji" alt=":wave:" loading="lazy" width="20" height="20">'
+      `Hello! <img src="/images/emoji/twitter/wave.png?v=${v}" title=":wave:" class="emoji" alt=":wave:" loading="lazy" width="20" height="20">`
     );
 
     cooked = await cook("[:wave:](https://example.com)");
     assert.strictEqual(
       await excerpt(cooked, 300),
-      '<a href="https://example.com"><img src="/images/emoji/twitter/wave.png?v=12" title=":wave:" class="emoji only-emoji" alt=":wave:" loading="lazy" width="20" height="20"></a>'
+      `<a href="https://example.com"><img src="/images/emoji/twitter/wave.png?v=${v}" title=":wave:" class="emoji only-emoji" alt=":wave:" loading="lazy" width="20" height="20"></a>`
     );
 
     cooked = await cook('<script>alert("hi")</script>');
@@ -70,6 +71,6 @@ module("Unit | Utility | text | parseMentions", function (hooks) {
     \`\`\`
     `;
     const mentions = await parseMentions(markdown);
-    assert.equal(mentions.length, 0);
+    assert.strictEqual(mentions.length, 0);
   });
 });

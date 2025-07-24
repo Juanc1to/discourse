@@ -3,9 +3,9 @@
 require "fastimage"
 
 class UploadCreator
-  TYPES_TO_CROP ||= %w[avatar card_background custom_emoji profile_background].each(&:freeze)
+  TYPES_TO_CROP = %w[avatar card_background custom_emoji profile_background].each(&:freeze)
 
-  ALLOWED_SVG_ELEMENTS ||= %w[
+  ALLOWED_SVG_ELEMENTS = %w[
     circle
     clipPath
     defs
@@ -175,7 +175,7 @@ class UploadCreator
         )
       @upload.original_sha1 = SiteSetting.secure_uploads? ? sha1 : nil
       @upload.url = ""
-      @upload.origin = @opts[:origin][0...1000] if @opts[:origin]
+      @upload.origin = @opts[:origin][0...2000] if @opts[:origin]
       @upload.extension = image_type || File.extname(@filename)[1..10]
 
       if is_image && !external_upload_too_big
@@ -307,12 +307,13 @@ class UploadCreator
         I18n.t(
           "upload.images.larger_than_x_megapixels",
           max_image_megapixels: SiteSetting.max_image_megapixels,
+          original_filename: @upload.original_filename,
         ),
       )
     end
   end
 
-  MIN_PIXELS_TO_CONVERT_TO_JPEG ||= 1280 * 720
+  MIN_PIXELS_TO_CONVERT_TO_JPEG = 1280 * 720
 
   def convert_png_to_jpeg?
     return false unless @image_info.type == :png
@@ -418,7 +419,7 @@ class UploadCreator
 
   MAX_CONVERT_FORMAT_SECONDS = 20
   def execute_convert(from, to, opts = {})
-    command = ["convert", from, "-auto-orient", "-background", "white", "-interlace", "none"]
+    command = ["magick", from, "-auto-orient", "-background", "white", "-interlace", "none"]
     command << "-flatten" unless opts[:flatten] == false
     command << "-debug" << "all" if opts[:debug]
     command << "-quality" << opts[:quality].to_s if opts[:quality]
@@ -526,7 +527,7 @@ class UploadCreator
     path = OptimizedImage.prepend_decoder!(path, nil, filename: "image.#{@image_info.type}")
 
     Discourse::Utils.execute_command(
-      "convert",
+      "magick",
       path,
       "-auto-orient",
       path,

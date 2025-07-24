@@ -1,19 +1,19 @@
 # frozen_string_literal: true
 
 RSpec.describe Theme do
-  after { Theme.clear_cache! }
-
-  before { ThemeJavascriptCompiler.disable_terser! }
-  after { ThemeJavascriptCompiler.enable_terser! }
-
-  fab! :user do
-    Fabricate(:user)
-  end
+  fab!(:user)
+  fab!(:theme) { Fabricate(:theme, user: user) }
 
   let(:guardian) { Guardian.new(user) }
-
-  fab!(:theme) { Fabricate(:theme, user: user) }
   let(:child) { Fabricate(:theme, user: user, component: true) }
+  let(:foundation_theme) { Theme.foundation_theme }
+
+  before { ThemeJavascriptCompiler.disable_terser! }
+
+  after do
+    Theme.clear_cache!
+    ThemeJavascriptCompiler.enable_terser!
+  end
 
   it "can properly clean up color schemes" do
     scheme = ColorScheme.create!(theme_id: theme.id, name: "test")
@@ -143,7 +143,7 @@ HTML
 
     expect(baked).to include(field.javascript_cache.url)
     expect(field.javascript_cache.content).to include("@ember/template-factory")
-    expect(field.javascript_cache.content).to include("raw-handlebars")
+    expect(field.javascript_cache.content).to include("Raw templates are no longer supported")
   end
 
   it "can destroy unbaked theme without errors" do
@@ -234,7 +234,7 @@ HTML
       f =
         ThemeField.create!(
           target_id: Theme.targets[:mobile],
-          theme_id: 1,
+          theme_id: -1,
           name: "after_header",
           value: html,
         )
@@ -293,7 +293,7 @@ HTML
 
       scss, _map =
         Stylesheet::Manager::Builder.new(
-          target: :desktop_theme,
+          target: :common_theme,
           theme: theme,
           manager: manager,
         ).compile(force: true)
@@ -320,7 +320,7 @@ HTML
 
       scss, _map =
         Stylesheet::Manager::Builder.new(
-          target: :desktop_theme,
+          target: :common_theme,
           theme: theme,
           manager: manager,
         ).compile(force: true)
@@ -334,7 +334,7 @@ HTML
 
       scss, _map =
         Stylesheet::Manager::Builder.new(
-          target: :desktop_theme,
+          target: :common_theme,
           theme: theme,
           manager: manager,
         ).compile(force: true)
@@ -342,17 +342,17 @@ HTML
       expect(scss).to include("font-size:30px")
 
       # Escapes correctly. If not, compiling this would throw an exception
-      setting.value = <<~CSS
+      setting.value = <<~SCSS
           \#{$fakeinterpolatedvariable}
           andanothervalue 'withquotes'; margin: 0;
-      CSS
+      SCSS
 
       theme.set_field(target: :common, name: :scss, value: "body {font-size: quote($font-size)}")
       theme.save!
 
       scss, _map =
         Stylesheet::Manager::Builder.new(
-          target: :desktop_theme,
+          target: :common_theme,
           theme: theme,
           manager: manager,
         ).compile(force: true)
@@ -440,7 +440,7 @@ HTML
   end
 
   it "correctly caches theme ids" do
-    Theme.where.not(id: theme.id).destroy_all
+    Theme.where.not(id: theme.id).delete_all
 
     theme2 = Fabricate(:theme)
 
@@ -467,8 +467,49 @@ HTML
     expect(Theme.user_theme_ids).to eq([])
   end
 
+  it "correctly caches enabled_theme_and_component_ids" do
+    Theme.delete_all
+
+    theme2 = Fabricate(:theme)
+
+    expect(Theme.enabled_theme_and_component_ids).to eq([])
+
+    theme2.update!(user_selectable: true)
+
+    expect(Theme.enabled_theme_and_component_ids).to contain_exactly(theme2.id)
+
+    theme2.update!(user_selectable: false)
+    theme2.set_default!
+    expect(Theme.enabled_theme_and_component_ids).to contain_exactly(theme2.id)
+
+    child2 = Fabricate(:theme, component: true)
+    theme2.add_relative_theme!(:child, child2)
+    expect(Theme.enabled_theme_and_component_ids).to contain_exactly(theme2.id, child2.id)
+
+    child2.update!(enabled: false)
+    expect(Theme.enabled_theme_and_component_ids).to contain_exactly(theme2.id)
+
+    theme3 = Fabricate(:theme, user_selectable: true)
+    child2.update!(enabled: true)
+
+    expect(Theme.enabled_theme_and_component_ids).to contain_exactly(
+      theme2.id,
+      child2.id,
+      theme3.id,
+    )
+
+    theme3.update!(enabled: false)
+
+    expect(Theme.enabled_theme_and_component_ids).to contain_exactly(theme2.id, child2.id)
+
+    theme2.destroy
+    theme3.destroy
+
+    expect(Theme.enabled_theme_and_component_ids).to eq([])
+  end
+
   it "correctly caches user_themes template" do
-    Theme.destroy_all
+    Theme.delete_all
 
     json = Site.json_for(guardian)
     user_themes = JSON.parse(json)["user_themes"]
@@ -504,7 +545,7 @@ HTML
   end
 
   it "clears color scheme cache correctly" do
-    Theme.destroy_all
+    Theme.delete_all
 
     cs =
       Fabricate(
@@ -526,7 +567,7 @@ HTML
 
     Theme.clear_default!
 
-    expect(ColorScheme.hex_for_name("header_primary")).to eq("333333")
+    expect(ColorScheme.hex_for_name("header_primary")).to eq("333")
   end
 
   it "correctly notifies about theme changes" do
@@ -535,12 +576,16 @@ HTML
 
     theme = Fabricate(:theme, user_selectable: true, user: user, color_scheme_id: cs1.id)
 
-    messages = MessageBus.track_publish { theme.save! }.filter { |m| m.channel == "/file-change" }
+    messages =
+      MessageBus
+        .track_publish do
+          theme.set_field(target: :common, name: :scss, value: "body { color: red; }")
+          theme.save!
+        end
+        .filter { |m| m.channel == "/file-change" }
     expect(messages.count).to eq(1)
-    expect(messages.first.data.map { |d| d[:target] }).to contain_exactly(
-      :desktop_theme,
-      :mobile_theme,
-    )
+
+    expect(messages.first.data.map { |d| d[:target] }).to contain_exactly(:common_theme)
 
     # With color scheme change:
     messages =
@@ -554,14 +599,13 @@ HTML
     expect(messages.first.data.map { |d| d[:target] }).to contain_exactly(
       :admin,
       :desktop,
-      :desktop_theme,
       :mobile,
-      :mobile_theme,
+      :common_theme,
     )
   end
 
   it "includes theme_uploads in settings" do
-    Theme.where.not(id: theme.id).destroy_all
+    Theme.where.not(id: theme.id).delete_all
 
     upload = UploadCreator.new(file_from_fixtures("logo.png"), "logo.png").create_for(-1)
     theme.set_field(type: :theme_upload_var, target: :common, name: "bob", upload_id: upload.id)
@@ -573,7 +617,7 @@ HTML
   end
 
   it "does not break on missing uploads in settings" do
-    Theme.where.not(id: theme.id).destroy_all
+    Theme.where.not(id: theme.id).delete_all
 
     upload = UploadCreator.new(file_from_fixtures("logo.png"), "logo.png").create_for(-1)
     theme.set_field(type: :theme_upload_var, target: :common, name: "bob", upload_id: upload.id)
@@ -588,7 +632,7 @@ HTML
 
   it "uses CDN url for theme_uploads in settings" do
     set_cdn_url("http://cdn.localhost")
-    Theme.where.not(id: theme.id).destroy_all
+    Theme.where.not(id: theme.id).delete_all
 
     upload = UploadCreator.new(file_from_fixtures("logo.png"), "logo.png").create_for(-1)
     theme.set_field(type: :theme_upload_var, target: :common, name: "bob", upload_id: upload.id)
@@ -601,7 +645,7 @@ HTML
 
   it "uses CDN url for settings of type upload" do
     set_cdn_url("http://cdn.localhost")
-    Theme.where.not(id: theme.id).destroy_all
+    Theme.where.not(id: theme.id).delete_all
 
     upload = UploadCreator.new(file_from_fixtures("logo.png"), "logo.png").create_for(-1)
     theme.set_field(target: :settings, name: "yaml", value: <<~YAML)
@@ -843,7 +887,7 @@ HTML
       manager = Stylesheet::Manager.new(theme_id: theme.id)
 
       builder =
-        Stylesheet::Manager::Builder.new(target: :desktop_theme, theme: theme, manager: manager)
+        Stylesheet::Manager::Builder.new(target: :common_theme, theme: theme, manager: manager)
 
       builder.compile(force: true)
     end
@@ -877,7 +921,7 @@ HTML
 
       builder =
         Stylesheet::Manager::Builder.new(
-          target: :desktop_theme,
+          target: :common_theme,
           theme: child_theme,
           manager: manager,
         )
@@ -1307,6 +1351,55 @@ HTML
         "deletions" => [{ "key" => "setting_that_will_be_removed", "val" => 1023 }],
       )
     end
+
+    it "does not raise an out of sequence error and does not create `ThemeSettingsMigration` record for out of sequence migration when `allow_out_of_sequence_migration` kwarg is set to true" do
+      second_migration_field =
+        Fabricate(
+          :migration_theme_field,
+          name: "0001-some-other-migration-name",
+          theme: theme,
+          value: <<~JS,
+          export default function migrate(settings) {
+            settings.set("integer_setting", 3);
+            return settings;
+          }
+        JS
+          version: 1,
+        )
+
+      expect do theme.migrate_settings end.to raise_error(
+        Theme::SettingsMigrationError,
+        /'0001-some-other-migration-name' is out of sequence/,
+      )
+
+      expect(theme.get_setting("integer_setting")).to eq(1)
+
+      theme.migrate_settings(allow_out_of_sequence_migration: true)
+
+      expect(theme.theme_settings_migrations.count).to eq(1)
+      expect(theme.theme_settings_migrations.first.theme_field_id).to eq(migration_field.id)
+      expect(theme.get_setting("integer_setting")).to eq(3)
+    end
+
+    it "allows custom migration fields to be run by specifing the `fields` kwarg" do
+      expect do theme.migrate_settings(fields: []) end.not_to change {
+        theme.theme_settings_migrations.count
+      }
+
+      second_migration_field =
+        Fabricate(:migration_theme_field, theme: theme, value: <<~JS, version: 2)
+          export default function migrate(settings) {
+            settings.set("integer_setting", 3);
+            return settings;
+          }
+        JS
+
+      theme.migrate_settings(fields: [second_migration_field])
+
+      expect(theme.theme_settings_migrations.count).to eq(1)
+      expect(theme.theme_settings_migrations.first.theme_field_id).to eq(second_migration_field.id)
+      expect(theme.get_setting("integer_setting")).to eq(3)
+    end
   end
 
   describe "development experience" do
@@ -1432,6 +1525,264 @@ HTML
       expect(Theme.lookup_field(theme_1.id, :translations, :en)).to eq(en_field.value_baked)
       expect(Theme.lookup_field(theme_1.id, :translations, :es)).to eq(es_field.value_baked)
       expect(Theme.lookup_field(theme_1.id, :translations, :fr)).to eq(en_field.value_baked)
+    end
+  end
+
+  describe "#repository_url" do
+    subject(:repository_url) { theme.repository_url }
+
+    context "when theme is not a remote one" do
+      it "returns nothing" do
+        expect(repository_url).to be_blank
+      end
+    end
+
+    context "when theme is a remote one" do
+      let!(:remote_theme) { theme.create_remote_theme(remote_url: remote_url) }
+
+      context "when URL is a SSH one" do
+        let(:remote_url) { "git@github.com:discourse/graceful.git" }
+
+        it "normalizes it" do
+          expect(repository_url).to eq "github.com/discourse/graceful"
+        end
+      end
+
+      context "when URL is a HTTPS one" do
+        let(:remote_url) { "https://github.com/discourse/graceful.git" }
+
+        it "normalizes it" do
+          expect(repository_url).to eq "github.com/discourse/graceful"
+        end
+      end
+
+      context "when URL is a HTTP one" do
+        let(:remote_url) { "http://github.com/discourse/graceful" }
+
+        it "normalizes it" do
+          expect(repository_url).to eq "github.com/discourse/graceful"
+        end
+      end
+
+      context "when URL contains query params" do
+        let(:remote_url) { "http://github.com/discourse/graceful.git?param_id=1" }
+
+        it "keeps the query params" do
+          expect(repository_url).to eq "github.com/discourse/graceful?param_id=1"
+        end
+      end
+    end
+  end
+
+  describe "#user_selectable_count" do
+    subject(:count) { theme.user_selectable_count }
+
+    let!(:users) { Fabricate.times(5, :user) }
+    let!(:another_theme) { Fabricate(:theme) }
+
+    before do
+      users.take(3).each { _1.user_option.update!(theme_ids: [theme.id]) }
+      users.slice(3..4).each { _1.user_option.update!(theme_ids: [another_theme.id]) }
+    end
+
+    it "returns how many users are currently using the theme" do
+      expect(count).to eq 3
+    end
+  end
+
+  describe "#owned_color_scheme" do
+    it "is destroyed when the theme is destroyed" do
+      scheme = Fabricate(:color_scheme, owning_theme: theme)
+
+      theme.destroy!
+
+      expect(ThemeColorScheme.exists?(color_scheme_id: scheme.id)).to eq(false)
+      expect(ColorScheme.unscoped.exists?(id: scheme.id)).to eq(false)
+    end
+  end
+
+  describe ".include_basic_relations" do
+    fab!(:parent_theme_1) do
+      Fabricate(
+        :theme,
+        theme_fields: [
+          ThemeField.new(
+            name: "en",
+            type_id: ThemeField.types[:yaml],
+            target_id: Theme.targets[:translations],
+            value: <<~YAML,
+            en:
+              theme_metadata:
+                description: "Description of my theme"
+          YAML
+          ),
+        ],
+      )
+    end
+
+    fab!(:parent_theme_2) do
+      Fabricate(
+        :theme,
+        theme_fields: [
+          ThemeField.new(
+            name: "en",
+            type_id: ThemeField.types[:yaml],
+            target_id: Theme.targets[:translations],
+            value: <<~YAML,
+            en:
+              theme_metadata:
+                description: "Description of my theme 2"
+          YAML
+          ),
+        ],
+      )
+    end
+
+    fab!(:component_1) do
+      Fabricate(
+        :theme,
+        component: true,
+        parent_themes: [parent_theme_1],
+        theme_fields: [
+          ThemeField.new(
+            name: "en",
+            type_id: ThemeField.types[:yaml],
+            target_id: Theme.targets[:translations],
+            value: <<~YAML,
+            en:
+              theme_metadata:
+                description: "Description of my component"
+            YAML
+          ),
+        ],
+      )
+    end
+
+    fab!(:component_2) do
+      Fabricate(
+        :theme,
+        component: true,
+        parent_themes: [parent_theme_2],
+        theme_fields: [
+          ThemeField.new(
+            name: "en",
+            type_id: ThemeField.types[:yaml],
+            target_id: Theme.targets[:translations],
+            value: <<~YAML,
+            en:
+              theme_metadata:
+                description: "Description of my component 2"
+            YAML
+          ),
+        ],
+      )
+    end
+
+    it "doesn't result in N+1 queries for descriptions" do
+      components = Theme.include_basic_relations.where(component: true, id: component_1.id)
+
+      queries_for_one =
+        track_sql_queries do
+          components.each do |component|
+            ComponentIndexSerializer.new(component, root: false).as_json
+          end
+        end
+
+      components =
+        Theme.include_basic_relations.where(component: true, id: [component_1.id, component_2.id])
+
+      queries_for_two =
+        track_sql_queries do
+          components.each do |component|
+            ComponentIndexSerializer.new(component, root: false).as_json
+          end
+        end
+
+      expect(queries_for_two.size).to eq(queries_for_one.size)
+    end
+  end
+
+  describe "#screenshot_url" do
+    it "returns nil when no screenshot is set" do
+      expect(theme.screenshot_url).to be_nil
+    end
+
+    it "returns the upload URL when screenshot is set" do
+      upload = UploadCreator.new(file_from_fixtures("logo.png"), "logo.png").create_for(-1)
+      theme.set_field(
+        target: :common,
+        name: "screenshot",
+        upload_id: upload.id,
+        type: :theme_screenshot_upload_var,
+      )
+      theme.save!
+      expect(theme.screenshot_url).to eq(upload.url)
+    end
+  end
+
+  describe "#find_or_create_owned_color_palette" do
+    it "correctly associates a theme with its owned color palette" do
+      palette = theme.find_or_create_owned_color_palette
+
+      expect(palette.owning_theme).to eq(theme)
+      expect(theme.reload.owned_color_palette).to eq(palette)
+    end
+
+    it "ensures owned color palette is not user selectable" do
+      palette = theme.find_or_create_owned_color_palette
+
+      expect(palette.user_selectable).to eq(false)
+    end
+
+    it "copies colors from base or theme color scheme" do
+      theme_without_scheme = Fabricate(:theme, color_scheme: nil)
+      base_palette = theme_without_scheme.find_or_create_owned_color_palette
+
+      expect(base_palette.colors.length).to be > 0
+      expect(base_palette.colors.map(&:name).sort).to eq(ColorScheme.base.colors.map(&:name).sort)
+
+      custom_palette =
+        Fabricate(
+          :color_scheme,
+          colors: [ColorSchemeColor.new(name: "custom", hex: "11ccff", dark_hex: "ee9955")],
+        )
+      theme_with_scheme = Fabricate(:theme, color_scheme: custom_palette)
+      custom_palette = theme_with_scheme.find_or_create_owned_color_palette
+
+      expect(custom_palette.colors.length).to be > 0
+      expect(custom_palette.colors.map(&:name).sort).to eq(custom_palette.colors.map(&:name).sort)
+    end
+
+    it "returns the existing palette if a race condition occurs and a theme-owned palette is created while it's executing" do
+      expect(theme.owned_color_palette).to eq(nil)
+
+      palette = Fabricate(:color_scheme)
+      ThemeColorScheme.create!(theme_id: theme.id, color_scheme_id: palette.id)
+
+      expect(theme.owned_color_palette).to eq(nil)
+      expect(theme.find_or_create_owned_color_palette.id).to eq(palette.id)
+      expect(theme.owned_color_palette).to eq(palette)
+    end
+  end
+
+  it "checks if fields can be updated for system themes" do
+    foundation_theme.update!(user_selectable: true)
+    expect(foundation_theme.user_selectable).to be true
+    expect { foundation_theme.update!(name: "edited system name") }.to raise_error(
+      Discourse::InvalidParameters,
+    )
+    expect { theme.update!(name: "edited name") }.not_to raise_error
+  end
+
+  it "does not allow system themes to be deleted" do
+    expect { foundation_theme.destroy! }.to raise_error(Discourse::InvalidParameters)
+    expect { theme.destroy! }.not_to raise_error
+  end
+
+  describe "#system?" do
+    it "returns system true for Horizon and Foundation themes" do
+      expect(foundation_theme.system?).to be true
+      expect(theme.system?).to be false
     end
   end
 end

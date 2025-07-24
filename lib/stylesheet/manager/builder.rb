@@ -3,11 +3,12 @@
 class Stylesheet::Manager::Builder
   attr_reader :theme
 
-  def initialize(target: :desktop, theme: nil, color_scheme: nil, manager:)
+  def initialize(target: :desktop, theme: nil, color_scheme: nil, manager:, dark: false)
     @target = target
     @theme = theme
     @color_scheme = color_scheme
     @manager = manager
+    @dark = dark
   end
 
   def compile(opts = {})
@@ -46,15 +47,17 @@ class Stylesheet::Manager::Builder
           source_map_file: source_map_url_relative_from_stylesheet,
           color_scheme_id: @color_scheme&.id,
           load_paths: load_paths,
+          dark: @dark,
+          strict_deprecations: %i[desktop mobile admin wizard].include?(@target),
         )
-      rescue SassC::SyntaxError, SassC::NotRenderedError => e
-        if Stylesheet::Importer::THEME_TARGETS.include?(@target.to_s)
+      rescue SassC::SyntaxError, SassC::NotRenderedError, DiscourseJsProcessor::TranspileError => e
+        if Stylesheet::Manager::THEME_REGEX.match?(@target.to_s)
           # no special errors for theme, handled in theme editor
-          ["", nil]
-        elsif @target.to_s == Stylesheet::Manager::COLOR_SCHEME_STYLESHEET
+          ["/* SCSS compilation error: #{e.message} */", nil]
+        elsif @target.to_s == Stylesheet::Manager::COLOR_SCHEME_STYLESHEET && Rails.env.production?
           # log error but do not crash for errors in color definitions SCSS
           Rails.logger.error "SCSS compilation error: #{e.message}"
-          ["", nil]
+          ["/* SCSS compilation error: #{e.message} */", nil]
         else
           raise Discourse::ScssError, e.message
         end
@@ -119,13 +122,14 @@ class Stylesheet::Manager::Builder
   end
 
   def qualified_target
+    dark_string = @dark ? "_dark" : ""
     if is_theme?
       "#{@target}_#{theme&.id}"
     elsif @color_scheme
-      "#{@target}_#{scheme_slug}_#{@color_scheme&.id}_#{@theme&.id}"
+      "#{@target}_#{scheme_slug}_#{@color_scheme&.id}_#{@theme&.id}#{dark_string}"
     else
       scheme_string = theme&.color_scheme ? "_#{theme.color_scheme.id}" : ""
-      "#{@target}#{scheme_string}"
+      "#{@target}#{scheme_string}#{dark_string}"
     end
   end
 
@@ -173,8 +177,9 @@ class Stylesheet::Manager::Builder
   end
 
   def scss_digest
-    if %i[mobile_theme desktop_theme].include?(@target)
-      resolve_baked_field(@target.to_s.sub("_theme", ""), :scss)
+    base_target = @target.to_s.delete_suffix("_rtl").to_sym
+    if %i[common_theme mobile_theme desktop_theme].include?(base_target)
+      resolve_baked_field(base_target.to_s.delete_suffix("_theme"), :scss)
     elsif @target == :embedded_theme
       resolve_baked_field(:common, :embedded_scss)
     else
@@ -240,20 +245,14 @@ class Stylesheet::Manager::Builder
   def color_scheme_digest
     cs = @color_scheme || theme&.color_scheme
 
-    categories_updated =
-      Stylesheet::Manager
-        .cache
-        .defer_get_set("categories_updated") do
-          Category.where("uploaded_background_id IS NOT NULL").pluck(:updated_at).map(&:to_i).sum
-        end
-
     fonts = "#{SiteSetting.base_font}-#{SiteSetting.heading_font}"
 
     digest_string = "#{current_hostname}-"
-    if cs || categories_updated > 0
+    if cs
       theme_color_defs = resolve_baked_field(:common, :color_definitions)
+      dark_string = @dark ? "-dark" : ""
       digest_string +=
-        "#{RailsMultisite::ConnectionManagement.current_db}-#{cs&.id}-#{cs&.version}-#{theme_color_defs}-#{Stylesheet::Manager.fs_asset_cachebuster}-#{categories_updated}-#{fonts}"
+        "#{RailsMultisite::ConnectionManagement.current_db}-#{cs&.id}-#{cs&.version}-#{theme_color_defs}-#{Stylesheet::Manager.fs_asset_cachebuster}-#{fonts}#{dark_string}"
     else
       digest_string += "defaults-#{Stylesheet::Manager.fs_asset_cachebuster}-#{fonts}"
 
@@ -277,13 +276,13 @@ class Stylesheet::Manager::Builder
     theme_ids = [theme_ids.first] if name != :color_definitions
 
     baked_fields = []
-    targets = [Theme.targets[target.to_sym], Theme.targets[:common]]
+    target_id = Theme.targets[target.to_sym]
 
     @manager
       .load_themes(theme_ids)
       .each do |theme|
         theme.builder_theme_fields.each do |theme_field|
-          if theme_field.name == name.to_s && targets.include?(theme_field.target_id)
+          if theme_field.name == name.to_s && theme_field.target_id == target_id
             baked_fields << theme_field
           end
         end

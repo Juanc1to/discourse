@@ -1,2 +1,8 @@
-tmp/*
-!/common/intermediate_db_schema/*.sql
+!/db/**/*.sql
+!/spec/support/fixtures/**/*.sql
+
+/config/upload.yml
+/lib/converters/**/settings.local.yml
+
+# converters within this directory should be ignored
+/private/

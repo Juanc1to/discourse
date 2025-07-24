@@ -20,11 +20,15 @@ class SiteSettings::TypeSupervisor
     list_type
     textarea
     json_schema
+    schema
+    requires_confirmation
   ].freeze
-  VALIDATOR_OPTS = %i[min max regex hidden regex_error json_schema].freeze
+  VALIDATOR_OPTS = %i[min max regex hidden regex_error json_schema schema].freeze
 
   # For plugins, so they can tell if a feature is supported
   SUPPORTED_TYPES = %i[email username list enum].freeze
+
+  REQUIRES_CONFIRMATION_TYPES = { simple: "simple", user_option: "user_option" }.freeze
 
   def self.types
     @types ||=
@@ -56,6 +60,7 @@ class SiteSettings::TypeSupervisor
         html_deprecated: 25,
         tag_group_list: 26,
         file_size_restriction: 27,
+        objects: 28,
       )
   end
 
@@ -91,6 +96,7 @@ class SiteSettings::TypeSupervisor
     @list_type = {}
     @textareas = {}
     @json_schemas = {}
+    @schemas = {}
   end
 
   def load_setting(name_arg, opts = {})
@@ -99,6 +105,7 @@ class SiteSettings::TypeSupervisor
     @textareas[name] = opts[:textarea] if opts[:textarea]
 
     @json_schemas[name] = opts[:json_schema].constantize if opts[:json_schema]
+    @schemas[name] = opts[:schema] if opts[:schema]
 
     if (enum = opts[:enum])
       @enums[name] = enum.is_a?(String) ? enum.constantize : enum
@@ -122,6 +129,11 @@ class SiteSettings::TypeSupervisor
         @allow_any[name] = opts[:allow_any] == false ? false : true
         @list_type[name] = opts[:list_type] if opts[:list_type]
       end
+
+      # add validator for objects
+      if type.to_sym == :objects
+        @validators[name] = { class: ObjectsSettingValidator, opts: { schema: opts[:schema] } }
+      end
     end
     @types[name] = get_data_type(name, @defaults_provider[name])
 
@@ -137,7 +149,6 @@ class SiteSettings::TypeSupervisor
     name = name.to_sym
     @types[name] = (@types[name] || get_data_type(name, value))
     type = (override_type || @types[name])
-
     case type
     when self.class.types[:float]
       value.to_f
@@ -169,7 +180,6 @@ class SiteSettings::TypeSupervisor
   def type_hash(name)
     name = name.to_sym
     type = get_type(name)
-
     result = { type: type.to_s }
 
     if type == :enum
@@ -199,6 +209,8 @@ class SiteSettings::TypeSupervisor
     result[:choices] = @choices[name] if @choices.has_key? name
     result[:list_type] = @list_type[name] if @list_type.has_key? name
     result[:textarea] = @textareas[name] if @textareas.has_key? name
+    result[:schema] = @schemas[name] if @schemas.has_key? name
+
     if @json_schemas.has_key?(name) && json_klass = json_schema_class(name)
       result[:json_schema] = json_klass.schema
     end
@@ -216,6 +228,52 @@ class SiteSettings::TypeSupervisor
 
   def get_list_type(name)
     @list_type[name.to_sym]
+  end
+
+  def validate_value(name, type, val)
+    if type == self.class.types[:enum]
+      if get_enum_class(name)
+        unless get_enum_class(name).valid_value?(val)
+          raise Discourse::InvalidParameters.new("Invalid value `#{val}` for `#{name}`")
+        end
+      else
+        unless (choice = @choices[name])
+          raise Discourse::InvalidParameters.new(name)
+        end
+
+        raise Discourse::InvalidParameters.new(:value) if choice.exclude?(val)
+      end
+    end
+
+    if type == self.class.types[:list] || type == self.class.types[:string]
+      if @allow_any.key?(name) && !@allow_any[name]
+        split = val.to_s.split("|")
+        resolved_choices = @choices[name]
+        if resolved_choices.first.is_a?(Hash)
+          resolved_choices = resolved_choices.map { |c| c[:value] }
+        end
+        diff = (split - resolved_choices)
+        if diff.length > 0
+          raise Discourse::InvalidParameters.new(
+                  I18n.t(
+                    "errors.site_settings.invalid_choice",
+                    name: diff.join(","),
+                    count: diff.length,
+                  ),
+                )
+        end
+      end
+    end
+
+    if (v = @validators[name])
+      validator = v[:class].new(v[:opts])
+      unless validator.valid_value?(val)
+        raise Discourse::InvalidParameters, "#{name}: #{validator.error_message}"
+      end
+    end
+
+    validate_method = "validate_#{name}"
+    public_send(validate_method, val) if self.respond_to? validate_method
   end
 
   private
@@ -246,48 +304,6 @@ class SiteSettings::TypeSupervisor
     end
 
     [val, type]
-  end
-
-  def validate_value(name, type, val)
-    if type == self.class.types[:enum]
-      if get_enum_class(name)
-        unless get_enum_class(name).valid_value?(val)
-          raise Discourse::InvalidParameters.new("Invalid value `#{val}` for `#{name}`")
-        end
-      else
-        unless (choice = @choices[name])
-          raise Discourse::InvalidParameters.new(name)
-        end
-
-        raise Discourse::InvalidParameters.new(:value) unless choice.include?(val)
-      end
-    end
-
-    if type == self.class.types[:list] || type == self.class.types[:string]
-      if @allow_any.key?(name) && !@allow_any[name]
-        split = val.to_s.split("|")
-        diff = (split - @choices[name])
-        if diff.length > 0
-          raise Discourse::InvalidParameters.new(
-                  I18n.t(
-                    "errors.site_settings.invalid_choice",
-                    name: diff.join(","),
-                    count: diff.length,
-                  ),
-                )
-        end
-      end
-    end
-
-    if (v = @validators[name])
-      validator = v[:class].new(v[:opts])
-      unless validator.valid_value?(val)
-        raise Discourse::InvalidParameters, "#{name}: #{validator.error_message}"
-      end
-    end
-
-    validate_method = "validate_#{name}"
-    public_send(validate_method, val) if self.respond_to? validate_method
   end
 
   def get_data_type(name, val)

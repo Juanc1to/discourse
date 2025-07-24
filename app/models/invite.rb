@@ -13,12 +13,12 @@ class Invite < ActiveRecord::Base
   include RateLimiter::OnCreateRecord
   include Trashable
 
-  # TODO(2021-05-22): remove
-  self.ignored_columns = %w[user_id redeemed_at]
+  self.ignored_columns = %w[user_id redeemed_at] # TODO: Remove when 20240212034010_drop_deprecated_columns has been promoted to pre-deploy
 
   BULK_INVITE_EMAIL_LIMIT = 200
   DOMAIN_REGEX =
     /\A(([a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9\-]*[a-zA-Z0-9])\.)+([A-Za-z0-9]|[A-Za-z0-9][A-Za-z0-9\-]*[A-Za-z0-9])\z/
+  DESCRIPTION_MAX_LENGTH = 100
 
   rate_limit :limit_invites_per_day
 
@@ -32,8 +32,10 @@ class Invite < ActiveRecord::Base
   has_many :topics, through: :topic_invites, source: :topic
 
   validates_presence_of :invited_by_id
-  validates :email, email: true, allow_blank: true
+  validates :email, email: true, allow_blank: true, length: { maximum: 500 }
   validates :custom_message, length: { maximum: 1000 }
+  validates :domain, length: { maximum: 500 }
+  validates :description, length: { maximum: DESCRIPTION_MAX_LENGTH }
   validate :ensure_max_redemptions_allowed
   validate :valid_redemption_count
   validate :valid_domain, if: :will_save_change_to_domain?
@@ -177,7 +179,14 @@ class Invite < ActiveRecord::Base
       )
     else
       create_args =
-        opts.slice(:email, :domain, :moderator, :custom_message, :max_redemptions_allowed)
+        opts.slice(
+          :email,
+          :description,
+          :domain,
+          :moderator,
+          :custom_message,
+          :max_redemptions_allowed,
+        )
       create_args[:invited_by] = invited_by
       create_args[:email] = email
       create_args[:emailed_status] = emailed_status
@@ -350,7 +359,7 @@ class Invite < ActiveRecord::Base
     self.domain.downcase!
 
     if self.domain !~ Invite::DOMAIN_REGEX
-      self.errors.add(:base, I18n.t("invite.domain_not_allowed"))
+      self.errors.add(:base, I18n.t("invite.domain_not_allowed_admin"))
     end
   end
 
@@ -382,6 +391,7 @@ end
 #  expires_at              :datetime         not null
 #  email_token             :string
 #  domain                  :string
+#  description             :string(100)
 #
 # Indexes
 #

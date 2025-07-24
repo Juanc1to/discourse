@@ -35,8 +35,6 @@ ur:
       flag: "فلَیگ"
       join: "شمولیت اختیار کریں"
       last_visit: "آخری وزٹ"
-      summarization:
-        summarize: "خلاصہ"
       reply: "جواب"
       edit: "ترمیم کریں"
       rebake_message: "HTML دوبارہ بِلڈ کریں"
@@ -66,6 +64,7 @@ ur:
         tabs:
           members: ممبران
           settings: ترتیبات
+        remove_member: "خارج کریں"
       new_message_modal:
         no_items: "کوئی اشیاء نہیں"
         filter: "فِلٹر"
@@ -138,6 +137,8 @@ ur:
             title: "عمومی"
           tracking:
             title: "ٹریک کیا جا رہا"
+          watching:
+            title: "نظر رکھی ہوئی ہے"
         participants_other_count:
           one: "+%{count}"
           other: "+%{count}"

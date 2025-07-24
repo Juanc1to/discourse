@@ -1,19 +1,24 @@
 import { run } from "@ember/runloop";
 import $ from "jquery";
 import { Promise } from "rsvp";
+import { isTesting } from "discourse/lib/environment";
+import getURL from "discourse/lib/get-url";
 import userPresent from "discourse/lib/user-presence";
 import Session from "discourse/models/session";
 import Site from "discourse/models/site";
 import User from "discourse/models/user";
-import { isTesting } from "discourse-common/config/environment";
-import getURL from "discourse-common/lib/get-url";
 
 let _trackView = false;
+let _topicId = null;
 let _transientHeader = null;
 let _logoffCallback;
 
 export function setTransientHeader(key, value) {
   _transientHeader = { key, value };
+}
+
+export function trackNextAjaxAsTopicView(topicId) {
+  _topicId = topicId;
 }
 
 export function trackNextAjaxAsPageview() {
@@ -40,10 +45,16 @@ function handleRedirect(xhr) {
   }
 }
 
+let activeCsrfRequest;
+
 export function updateCsrfToken() {
-  return ajax("/session/csrf").then((result) => {
-    Session.currentProp("csrfToken", result.csrf);
-  });
+  if (!activeCsrfRequest) {
+    activeCsrfRequest = ajax("/session/csrf")
+      .then((result) => Session.currentProp("csrfToken", result.csrf))
+      .finally(() => (activeCsrfRequest = null));
+  }
+
+  return activeCsrfRequest;
 }
 
 /**
@@ -92,8 +103,12 @@ export function ajax() {
 
     if (_trackView && (!args.type || args.type === "GET")) {
       _trackView = false;
-      // DON'T CHANGE: rack is prepending "HTTP_" in the header's name
       args.headers["Discourse-Track-View"] = "true";
+
+      if (_topicId) {
+        args.headers["Discourse-Track-View-Topic-Id"] = _topicId;
+      }
+      _topicId = null;
     }
 
     if (userPresent()) {

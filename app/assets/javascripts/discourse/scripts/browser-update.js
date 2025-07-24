@@ -49,7 +49,7 @@
     if (!t || t.indexOf(".browser_update]") !== -1) {
       // very old browsers might fail to load even translations
       t =
-        'Unfortunately, <a href="https://www.discourse.org/faq/#browser">your browser is unsupported</a>. Please <a href="https://browsehappy.com">switch to a supported browser</a> to view rich content, log in and reply.';
+        'Unfortunately, <a href="https://discourse.org/about#browser">your browser is unsupported</a>. Please <a href="https://browsehappy.com">switch to a supported browser</a> to view rich content, log in and reply.';
     }
 
     // create the notification div HTML
@@ -68,9 +68,11 @@
     try {
       sheet.innerText = style;
       sheet.innerHTML = style;
+      // eslint-disable-next-line no-unused-vars -- old browsers require binding this variable, even if unused
     } catch (e) {
       try {
         sheet.styleSheet.cssText = style;
+        // eslint-disable-next-line no-unused-vars -- old browser require binding this variable, even if unused
       } catch (ex) {
         return;
       }

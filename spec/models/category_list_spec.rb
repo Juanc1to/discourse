@@ -1,7 +1,5 @@
 # frozen_string_literal: true
 
-require "category_list"
-
 RSpec.describe CategoryList do
   before do
     # we need automatic updating here cause we are testing this
@@ -11,6 +9,29 @@ RSpec.describe CategoryList do
   fab!(:user)
   fab!(:admin)
   let(:category_list) { CategoryList.new(Guardian.new(user), include_topics: true) }
+
+  context "when a category has a secret subcategory" do
+    fab!(:category)
+
+    fab!(:secret_subcategory) do
+      cat = Fabricate(:category, parent_category: category)
+      cat.set_permissions(admins: :full)
+      cat.save!
+      cat
+    end
+
+    let(:admin_category_list) { CategoryList.new(Guardian.new(admin), include_topics: true) }
+
+    it "doesn't set has_children when an unpriveleged user is querying" do
+      found = category_list.categories.find { |c| c.id == category.id }
+      expect(found.has_children).to eq(false)
+    end
+
+    it "sets has_children when an admin is querying" do
+      found = admin_category_list.categories.find { |c| c.id == category.id }
+      expect(found.has_children).to eq(true)
+    end
+  end
 
   describe "security" do
     it "properly hide secure categories" do
@@ -27,21 +48,21 @@ RSpec.describe CategoryList do
 
     it "doesn't show topics that you can't view" do
       public_cat = Fabricate(:category_with_definition) # public category
-      Fabricate(:topic, category: public_cat)
+      topic_in_public_cat = Fabricate(:topic, category: public_cat)
 
       private_cat = Fabricate(:category_with_definition) # private category
-      Fabricate(:topic, category: private_cat)
+      topic_in_private_cat = Fabricate(:topic, category: private_cat)
       private_cat.set_permissions(admins: :full)
       private_cat.save
 
       secret_subcat = Fabricate(:category_with_definition, parent_category_id: public_cat.id) # private subcategory
-      Fabricate(:topic, category: secret_subcat)
+      topic_in_secret_subcat = Fabricate(:topic, category: secret_subcat)
       secret_subcat.set_permissions(admins: :full)
       secret_subcat.save
 
       muted_tag = Fabricate(:tag) # muted tag
       SiteSetting.default_tags_muted = muted_tag.name
-      Fabricate(:topic, category: public_cat, tags: [muted_tag])
+      topic_in_public_cat_2 = Fabricate(:topic, category: public_cat, tags: [muted_tag])
 
       muted_tag_2 = Fabricate(:tag)
       TagUser.create!(
@@ -58,16 +79,21 @@ RSpec.describe CategoryList do
           .categories
           .find { |x| x.name == public_cat.name }
           .displayable_topics
-          .count,
-      ).to eq(3)
+          .map(&:id),
+      ).to contain_exactly(
+        topic_in_public_cat.id,
+        topic_in_secret_subcat.id,
+        topic_in_public_cat_2.id,
+      )
+
       expect(
         CategoryList
           .new(Guardian.new(admin), include_topics: true)
           .categories
           .find { |x| x.name == private_cat.name }
           .displayable_topics
-          .count,
-      ).to eq(1)
+          .map(&:id),
+      ).to contain_exactly(topic_in_private_cat.id)
 
       expect(
         CategoryList
@@ -75,8 +101,9 @@ RSpec.describe CategoryList do
           .categories
           .find { |x| x.name == public_cat.name }
           .displayable_topics
-          .count,
-      ).to eq(2)
+          .map(&:id),
+      ).to contain_exactly(topic_in_public_cat.id, topic_in_public_cat_2.id)
+
       expect(
         CategoryList
           .new(Guardian.new(user), include_topics: true)
@@ -90,8 +117,9 @@ RSpec.describe CategoryList do
           .categories
           .find { |x| x.name == public_cat.name }
           .displayable_topics
-          .count,
-      ).to eq(1)
+          .map(&:id),
+      ).to contain_exactly(topic_in_public_cat.id)
+
       expect(
         CategoryList
           .new(Guardian.new(nil), include_topics: true)
@@ -112,8 +140,8 @@ RSpec.describe CategoryList do
           .categories
           .find { |x| x.name == cat.name }
           .displayable_topics
-          .count,
-      ).to eq(1)
+          .map(&:id),
+      ).to contain_exactly(topic.id)
 
       TopicUser.change(user.id, topic.id, notification_level: TopicUser.notification_levels[:muted])
 
@@ -406,6 +434,101 @@ RSpec.describe CategoryList do
         nil,
         category.id,
       )
+    end
+
+    context "with parent_category_id" do
+      it "returns subcategories" do
+        category_list = CategoryList.new(Guardian.new(user), parent_category_id: category.id)
+
+        expect(category_list.categories.size).to eq(1)
+      end
+    end
+  end
+
+  describe "with many categories (more than MAX_UNOPTIMIZED_CATEGORIES)" do
+    fab!(:category)
+    fab!(:subcategory) { Fabricate(:category, parent_category: category) }
+
+    it "returns at most CATEGORIES_PER_PAGE categories" do
+      stub_const(CategoryList, "MAX_UNOPTIMIZED_CATEGORIES", 1) do
+        category_list = CategoryList.new(Guardian.new(user))
+
+        expect(category_list.categories).to eq(
+          [Category.find(SiteSetting.uncategorized_category_id), category, subcategory],
+        )
+      end
+    end
+
+    context "with parent_category_id" do
+      it "returns at most CATEGORIES_PER_PAGE subcategories" do
+        subcategory_2 = Fabricate(:category, parent_category: category)
+
+        stub_const(CategoryList, "MAX_UNOPTIMIZED_CATEGORIES", 1) do
+          category_list = CategoryList.new(Guardian.new(user), parent_category_id: category.id)
+
+          expect(category_list.categories).to eq([subcategory, subcategory_2])
+        end
+      end
+    end
+  end
+
+  describe "with displayable topics" do
+    fab!(:category) { Fabricate(:category, num_featured_topics: 2) }
+    fab!(:topic) { Fabricate(:topic, category: category) }
+
+    it "preloads topic associations" do
+      DiscoursePluginRegistry.register_category_list_topics_preloader_association(
+        :first_post,
+        Plugin::Instance.new,
+      )
+
+      category = Fabricate(:category_with_definition)
+      Fabricate(:topic, category: category)
+
+      CategoryFeaturedTopic.feature_topics
+
+      displayable_topics =
+        CategoryList
+          .new(Guardian.new(admin), include_topics: true)
+          .categories
+          .find { |x| x.id == category.id }
+          .displayable_topics
+      expect(displayable_topics.first.association(:first_post).loaded?).to eq(true)
+
+      DiscoursePluginRegistry.reset_register!(:category_list_topics_preloader_associations)
+    end
+  end
+
+  context "with content_localization_enabled enabled" do
+    fab!(:category) { Fabricate(:category, name: "Original Name", description: "Original Desc") }
+    fab!(:category_localization) { Fabricate(:category_localization, category:, locale: "ja") }
+
+    let(:locale) { "ja" }
+
+    before do
+      SiteSetting.content_localization_enabled = true
+      I18n.locale = locale
+    end
+
+    it "returns the localized name and description for the category" do
+      cl = CategoryList.new(Guardian.new)
+      cat = cl.categories.find { |c| c.id == category.id }
+      expect(cat.name).to eq(category_localization.name)
+      expect(cat.description).to eq(category_localization.description)
+    end
+
+    it "falls back to the original name and description if no localization exists" do
+      other_category = Fabricate(:category, name: "Other Name", description: "Other Desc")
+      cl = CategoryList.new(Guardian.new)
+      cat = cl.categories.find { |c| c.id == other_category.id }
+      expect(cat.name).to eq("Other Name")
+      expect(cat.description).to eq("Other Desc")
+    end
+
+    it "safely returns categories when SiteSetting.fixed_category_positions is enabled" do
+      SiteSetting.fixed_category_positions = true
+      category_list = CategoryList.new(Guardian.new)
+      expect(category_list.categories).to include(category)
     end
   end
 end

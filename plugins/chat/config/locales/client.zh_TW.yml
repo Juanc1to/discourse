@@ -26,11 +26,15 @@ zh_TW:
           descriptions:
             chat:
               create_message: "在指定頻道中建立聊天訊息。"
+    about:
+      chat_messages_count: "聊天訊息"
+      chat_channels_count: "聊天頻道"
+      chat_users_count: "聊天使用者"
     chat:
+      back_to_forum: "論壇"
       deleted_chat_username: 已刪除
       dates:
         yesterday: "昨天"
-        time_tiny: "h:mm"
       all_loaded: "顯示所有訊息"
       already_enabled: "此主題已啟用聊天功能。請重新整理。"
       disabled_for_topic: "此主題的聊天功能已停用。"
@@ -66,6 +70,9 @@ zh_TW:
         title: "關閉頻道"
       channel_delete:
         title: "刪除頻道"
+        confirm_channel_name: "輸入頻道名稱"
+      channels_list_popup:
+        browse: "瀏覽頻道"
       close: "關閉"
       remove: "移除"
       delete: "刪除"
@@ -80,21 +87,19 @@ zh_TW:
       header_indicator_preference:
         all_new: "所有新訊息"
         never: "永不"
+      enable: "啟用聊天"
       flag: "檢舉"
       heading: "聊天"
       join: "加入"
       last_visit: "上次到訪"
-      summarization:
-        title: "摘要訊息"
-        summarize: "總結"
-        since:
-          other: "前 %{count} 小時"
+      no_public_channels_cta: "瀏覽頻道"
       remove_upload: "移除檔案"
       react: "用表情符號反應"
       reply: "回覆"
       edit: "編輯"
       copy_link: "複製連結"
       rebake_message: "重建 HTML"
+      message_too_long: "訊息過長，不得超過 %{count} 個字元。"
       retry_staged_message:
         title: "網路錯誤"
         action: "再次發送？"
@@ -143,6 +148,7 @@ zh_TW:
         tabs:
           members: 成員
           settings: 設定
+        remove_member: "移除"
       new_message_modal:
         title: 傳送訊息
         add_user_short: <span>新增使用者</span>
@@ -180,6 +186,7 @@ zh_TW:
       notification_levels:
         never: "永不"
       settings:
+        auto_join_users_label: "自動新增使用者"
         follow: "加入"
         followed: "建立日期"
         threading_enabled: "啟用"
@@ -253,6 +260,8 @@ zh_TW:
             title: "一般"
           tracking:
             title: "跟蹤"
+          watching:
+            title: "關注中"
         participants_other_count:
           other: "+%{count}"
       threads:

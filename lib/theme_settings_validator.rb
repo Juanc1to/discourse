@@ -29,7 +29,7 @@ class ThemeSettingsValidator
 
       case type
       when types[:enum]
-        unless opts[:choices].include?(value) || opts[:choices].map(&:to_s).include?(value)
+        if opts[:choices].exclude?(value) && opts[:choices].map(&:to_s).exclude?(value)
           errors << I18n.t(
             "themes.settings_errors.enum_value_not_valid",
             choices: opts[:choices].join(", "),
@@ -45,11 +45,15 @@ class ThemeSettingsValidator
         )
       when types[:string]
         validate_value_in_range!(
-          value.length,
+          value.to_s.length,
           min: opts[:min],
           max: opts[:max],
           errors:,
           translation_prefix: "string",
+        )
+      when types[:objects]
+        errors.concat(
+          SchemaSettingsObjectValidator.validate_objects(schema: opts[:schema], objects: value),
         )
       end
 

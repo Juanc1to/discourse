@@ -1,4 +1,4 @@
-import I18n from "discourse-i18n";
+import { i18n } from "discourse-i18n";
 
 export function getFormTemplateObject(form) {
   const formData = new FormData(form);
@@ -11,7 +11,11 @@ export function getFormTemplateObject(form) {
   return formObject;
 }
 
-export default function prepareFormTemplateData(form, formTemplate) {
+export default function prepareFormTemplateData(
+  form,
+  formTemplate,
+  checkFormValidity = true
+) {
   const labelMap = formTemplate.reduce((acc, field) => {
     acc[field.id] = field.attributes.label;
     return acc;
@@ -20,9 +24,11 @@ export default function prepareFormTemplateData(form, formTemplate) {
   const formData = new FormData(form);
 
   // Validate the form template
-  _validateFormTemplateData(form);
-  if (!form.checkValidity()) {
-    return false;
+  if (checkFormValidity) {
+    _validateFormTemplateData(form);
+    if (!form.checkValidity()) {
+      return false;
+    }
   }
 
   // Gather form template data
@@ -101,11 +107,17 @@ function _validateFormTemplateData(form) {
 
 function _showErrorMessage(field, element) {
   if (field.validity.valueMissing) {
-    const prefix = "form_templates.errors.valueMissing";
+    const prefix = "form_templates.errors.value_missing";
     const types = ["select-one", "select-multiple", "checkbox"];
-    _showErrorByType(element, field, prefix, types);
+
+    const i18nMappings = {
+      "select-one": "select_one",
+      "select-multiple": "select_multiple",
+    };
+
+    _showErrorByType(element, field, prefix, types, i18nMappings);
   } else if (field.validity.typeMismatch) {
-    const prefix = "form_templates.errors.typeMismatch";
+    const prefix = "form_templates.errors.type_mismatch";
     const types = [
       "color",
       "date",
@@ -118,35 +130,39 @@ function _showErrorMessage(field, element) {
     ];
     _showErrorByType(element, field, prefix, types);
   } else if (field.validity.tooShort) {
-    element.textContent = I18n.t("form_templates.errors.tooShort", {
+    element.textContent = i18n("form_templates.errors.too_short", {
       count: field.minLength,
     });
   } else if (field.validity.tooLong) {
-    element.textContent = I18n.t("form_templates.errors.tooLong", {
+    element.textContent = i18n("form_templates.errors.too_long", {
       count: field.maxLength,
     });
   } else if (field.validity.rangeOverflow) {
-    element.textContent = I18n.t("form_templates.errors.rangeOverflow", {
+    element.textContent = i18n("form_templates.errors.range_overflow", {
       count: field.max,
     });
   } else if (field.validity.rangeUnderflow) {
-    element.textContent = I18n.t("form_templates.errors.rangeUnderflow", {
+    element.textContent = i18n("form_templates.errors.range_underflow", {
       count: field.min,
     });
   } else if (field.validity.patternMismatch) {
-    element.textContent = I18n.t("form_templates.errors.patternMismatch");
+    element.textContent = i18n("form_templates.errors.pattern_mismatch");
   } else if (field.validity.badInput) {
-    element.textContent = I18n.t("form_templates.errors.badInput");
+    element.textContent = i18n("form_templates.errors.bad_input");
   }
 }
 
-function _showErrorByType(element, field, prefix, types) {
+function _showErrorByType(element, field, prefix, types, i18nMappings) {
   if (!types.includes(field.type)) {
-    element.textContent = I18n.t(`${prefix}.default`);
+    element.textContent = i18n(`${prefix}.default`);
   } else {
     types.forEach((type) => {
       if (field.type === type) {
-        element.textContent = I18n.t(`${prefix}.${type}`);
+        element.textContent = i18n(
+          `${prefix}.${
+            i18nMappings && i18nMappings[type] ? i18nMappings[type] : type
+          }`
+        );
       }
     });
   }

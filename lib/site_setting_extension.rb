@@ -4,6 +4,11 @@ module SiteSettingExtension
   include SiteSettings::DeprecatedSettings
   include HasSanitizableFields
 
+  SiteSettingChangeResult = Struct.new(:previous_value, :new_value)
+  InvalidSettingAccess = Class.new(StandardError)
+
+  delegate :description, :keywords, :placeholder, :humanized_name, to: SiteSettings::LabelFormatter
+
   # support default_locale being set via global settings
   # this also adds support for testing the extension and global settings
   # for site locale
@@ -75,6 +80,11 @@ module SiteSettingExtension
     @containers[provider.current_site] ||= {}
   end
 
+  def theme_site_settings
+    @theme_site_settings ||= {}
+    @theme_site_settings[provider.current_site] ||= {}
+  end
+
   def defaults
     @defaults ||= SiteSettings::DefaultsProvider.new(self)
   end
@@ -87,8 +97,24 @@ module SiteSettingExtension
     @categories ||= {}
   end
 
+  def themeable
+    @themeable ||= {}
+  end
+
+  def areas
+    @areas ||= {}
+  end
+
+  def mandatory_values
+    @mandatory_values ||= {}
+  end
+
   def shadowed_settings
-    @shadowed_settings ||= []
+    @shadowed_settings ||= Set.new
+  end
+
+  def requires_confirmation_settings
+    @requires_confirmation_settings ||= {}
   end
 
   def hidden_settings_provider
@@ -112,7 +138,7 @@ module SiteSettingExtension
   end
 
   def secret_settings
-    @secret_settings ||= []
+    @secret_settings ||= Set.new
   end
 
   def plugins
@@ -131,54 +157,119 @@ module SiteSettingExtension
     @deprecated_settings ||= SiteSettings::DeprecatedSettings::SETTINGS.map(&:first).to_set
   end
 
-  def settings_hash
-    result = {}
+  def deprecated_setting_alias(setting_name)
+    SiteSettings::DeprecatedSettings::SETTINGS
+      .find { |setting| setting.second.to_s == setting_name.to_s }
+      &.first
+  end
 
-    defaults.all.keys.each do |s|
-      result[s] = if deprecated_settings.include?(s.to_s)
-        public_send(s, warn: false).to_s
-      else
-        public_send(s).to_s
-      end
-    end
+  def theme_site_settings_json(theme_id)
+    key = SiteSettingExtension.theme_site_settings_cache_key(theme_id)
+    json =
+      Discourse
+        .cache
+        .fetch(key, expires_in: 30.minutes) { theme_site_settings_json_uncached(theme_id) }
+    Rails.logger.error("Nil theme_site_settings_json from the cache for '#{key}'") if json.nil?
+    json || ""
+  rescue => e
+    Rails.logger.error("Error while retrieving theme_site_settings_json: #{e.message}")
+    ""
+  end
 
-    result
+  def setting_metadata_hash(setting)
+    setting_hash = {
+      setting:,
+      default: SiteSetting.defaults[setting],
+      description: SiteSetting.description(setting),
+      humanized_name: SiteSetting.humanized_name(setting),
+    }.merge(type_supervisor.type_hash(setting))
+  end
+
+  def themeable_site_settings
+    themeable.select { |_, value| value }.keys.sort
   end
 
   def client_settings_json
-    Discourse
-      .cache
-      .fetch(SiteSettingExtension.client_settings_cache_key, expires_in: 30.minutes) do
-        client_settings_json_uncached
-      end
+    key = SiteSettingExtension.client_settings_cache_key
+    json = Discourse.cache.fetch(key, expires_in: 30.minutes) { client_settings_json_uncached }
+    Rails.logger.error("Nil client_settings_json from the cache for '#{key}'") if json.nil?
+    json || ""
+  rescue => e
+    Rails.logger.error("Error while retrieving client_settings_json: #{e.message}")
+    ""
   end
 
   def client_settings_json_uncached
-    MultiJson.dump(
-      Hash[
-        *@client_settings
-          .map do |name|
-            value =
-              if deprecated_settings.include?(name.to_s)
-                public_send(name, warn: false)
-              else
-                public_send(name)
-              end
-            type = type_supervisor.get_type(name)
-            value = value.to_s if type == :upload
-            value = value.map(&:to_s).join("|") if type == :uploaded_image_list
+    uncached_json =
+      @client_settings.filter_map do |name|
+        # Themeable site settings require a theme ID, which we do not always
+        # have when loading client site settings. They are excluded here,
+        # to get them use theme_site_settings_json(:theme_id)
+        next if themeable[name]
 
-            [name, value]
+        value =
+          if deprecated_settings.include?(name.to_s)
+            public_send(name, warn: false)
+          else
+            public_send(name)
           end
-          .flatten
-      ],
-    )
+
+        type = type_supervisor.get_type(name)
+        if type == :upload
+          value = value.to_s
+        elsif type == :uploaded_image_list
+          value = value.map(&:to_s).join("|")
+        end
+
+        [name, value]
+      end
+    MultiJson.dump(Hash[uncached_json])
+  rescue => err
+    # If something goes wrong here we really need to be aware of it in tests.
+    raise err if Rails.env.test?
+
+    Rails.logger.error("Error while generating client_settings_json_uncached: #{err.message}")
+    nil
+  end
+
+  def theme_site_settings_json_uncached(theme_id)
+    begin
+      # There are a few legit scenarios where the current
+      # theme ID may be blank, such as safe mode. In this
+      # case it will be better to return default site setting
+      # values rather than to cause random/undefined behaviour
+      # in the UI.
+      if theme_id.blank?
+        MultiJson.dump(ThemeSiteSetting.generate_defaults_map)
+      else
+        MultiJson.dump(theme_site_settings[theme_id])
+      end
+    rescue => err
+      # If something goes wrong here we really need to be aware of it in tests.
+      raise err if Rails.env.test?
+
+      Rails.logger.error(
+        "Error while generating theme_site_settings_json_uncached for theme ID #{theme_id}: #{err.message}",
+      )
+      nil
+    end
   end
 
   # Retrieve all settings
-  def all_settings(include_hidden: false)
+  def all_settings(
+    include_hidden: false,
+    include_locale_setting: true,
+    only_overridden: false,
+    basic_attributes: false,
+    filter_categories: nil,
+    filter_plugin: nil,
+    filter_names: nil,
+    filter_allowed_hidden: nil,
+    filter_area: nil
+  )
     locale_setting_hash = {
       setting: "default_locale",
+      humanized_name: humanized_name("default_locale"),
       default: SiteSettings::DefaultsProvider::DEFAULT_LOCALE,
       category: "required",
       description: description("default_locale"),
@@ -189,12 +280,48 @@ module SiteSettingExtension
       translate_names: LocaleSiteSetting.translate_names?,
     }
 
+    include_locale_setting = false if filter_categories.present? || filter_plugin.present?
+
     defaults
       .all(default_locale)
       .reject do |setting_name, _|
         plugins[name] && !Discourse.plugins_by_name[plugins[name]].configurable?
       end
-      .reject { |setting_name, _| !include_hidden && hidden_settings.include?(setting_name) }
+      .select do |setting_name, _|
+        is_hidden = hidden_settings.include?(setting_name)
+
+        next true if !is_hidden
+        next false if !include_hidden
+        next true if filter_allowed_hidden.nil?
+
+        filter_allowed_hidden.include?(setting_name)
+      end
+      .select do |setting_name, _|
+        if filter_categories && filter_categories.any?
+          filter_categories.include?(categories[setting_name])
+        else
+          true
+        end
+      end
+      .select do |setting_name, _|
+        if filter_area
+          Array.wrap(areas[setting_name]).include?(filter_area)
+        else
+          true
+        end
+      end
+      .select do |setting_name, _|
+        if filter_plugin
+          plugins[setting_name] == filter_plugin
+        else
+          true
+        end
+      end
+      .reject do |setting_name, _|
+        # Do not show themeable site settings all_settings list or in the UI, they
+        # are managed separately via the ThemeSiteSetting model.
+        themeable[setting_name]
+      end
       .map do |s, v|
         type_hash = type_supervisor.type_hash(s)
         default = defaults.get(s, default_locale).to_s
@@ -208,37 +335,47 @@ module SiteSettingExtension
 
         opts = {
           setting: s,
+          humanized_name: humanized_name(s),
           description: description(s),
           keywords: keywords(s),
-          default: default,
-          value: value.to_s,
           category: categories[s],
-          preview: previews[s],
-          secret: secret_settings.include?(s),
-          placeholder: placeholder(s),
-        }.merge!(type_hash)
+          primary_area: areas[s]&.first,
+        }
+
+        if !basic_attributes
+          opts.merge!(
+            default: default,
+            value: value.to_s,
+            preview: previews[s],
+            secret: secret_settings.include?(s),
+            placeholder: placeholder(s),
+            mandatory_values: mandatory_values[s],
+            requires_confirmation: requires_confirmation_settings[s],
+            themeable: themeable[s],
+          )
+          opts.merge!(type_hash)
+        end
 
         opts[:plugin] = plugins[s] if plugins[s]
 
         opts
       end
-      .unshift(locale_setting_hash)
-  end
-
-  def description(setting)
-    I18n.t("site_settings.#{setting}", base_path: Discourse.base_path)
-  end
-
-  def keywords(setting)
-    I18n.t("site_settings.keywords.#{setting}", default: "")
-  end
-
-  def placeholder(setting)
-    if !I18n.t("site_settings.placeholder.#{setting}", default: "").empty?
-      I18n.t("site_settings.placeholder.#{setting}")
-    elsif SiteIconManager.respond_to?("#{setting}_url")
-      SiteIconManager.public_send("#{setting}_url")
-    end
+      .select do |setting|
+        if only_overridden
+          setting[:value] != setting[:default]
+        else
+          true
+        end
+      end
+      .select do |setting|
+        if filter_names
+          filter_names.include?(setting[:setting].to_s)
+        else
+          true
+        end
+      end
+      .unshift(include_locale_setting && !only_overridden ? locale_setting_hash : nil)
+      .compact
   end
 
   def self.client_settings_cache_key
@@ -248,39 +385,65 @@ module SiteSettingExtension
     "client_settings_json_#{Discourse.git_version}"
   end
 
-  # refresh all the site settings
-  def refresh!
+  def self.theme_site_settings_cache_key(theme_id)
+    theme_id = "notheme" if theme_id.blank?
+
+    # NOTE: we use the git version in the key to ensure
+    # that we don't end up caching the incorrect version
+    # in cases where we are cycling unicorns
+    "theme_site_settings_json_#{theme_id}__#{Discourse.git_version}"
+  end
+
+  # Refresh all the site settings and theme site settings
+  def refresh!(refresh_site_settings: true, refresh_theme_site_settings: true)
     mutex.synchronize do
       ensure_listen_for_changes
 
-      new_hash =
-        Hash[
-          *(
-            defaults
-              .db_all
-              .map do |s|
-                [s.name.to_sym, type_supervisor.to_rb_value(s.name, s.value, s.data_type)]
-              end
-              .to_a
-              .flatten
-          )
-        ]
+      if refresh_site_settings
+        new_hash =
+          Hash[
+            *(
+              provider
+                .all
+                .map do |s|
+                  [s.name.to_sym, type_supervisor.to_rb_value(s.name, s.value, s.data_type)]
+                end
+                .to_a
+                .flatten
+            )
+          ]
 
-      defaults_view = defaults.all(new_hash[:default_locale])
+        defaults_view = defaults.all(new_hash[:default_locale])
 
-      # add locale default and defaults based on default_locale, cause they are cached
-      new_hash = defaults_view.merge!(new_hash)
+        # add locale default and defaults based on default_locale, cause they are cached
+        new_hash = defaults_view.merge!(new_hash)
 
-      # add shadowed
-      shadowed_settings.each { |ss| new_hash[ss] = GlobalSetting.public_send(ss) }
+        # add shadowed
+        shadowed_settings.each { |ss| new_hash[ss] = GlobalSetting.public_send(ss) }
 
-      changes, deletions = diff_hash(new_hash, current)
+        changes, deletions = diff_hash(new_hash, current)
 
-      changes.each { |name, val| current[name] = val }
-      deletions.each { |name, _| current[name] = defaults_view[name] }
-      uploads.clear
+        changes.each { |name, val| current[name] = val }
+        deletions.each { |name, _| current[name] = defaults_view[name] }
+        uploads.clear
+      end
 
-      clear_cache!
+      if refresh_theme_site_settings
+        new_theme_site_settings = ThemeSiteSetting.generate_theme_map
+
+        theme_site_setting_changes, theme_site_setting_deletions =
+          diff_hash(new_theme_site_settings, theme_site_settings)
+        theme_site_setting_changes.each do |theme_id, settings|
+          theme_site_settings[theme_id] ||= {}
+          theme_site_settings[theme_id].merge!(settings)
+        end
+        theme_site_setting_deletions.each { |theme_id, _| theme_site_settings.delete(theme_id) }
+      end
+
+      clear_cache!(
+        expire_theme_site_setting_cache:
+          ThemeSiteSetting.can_access_db? && refresh_theme_site_settings,
+      )
     end
   end
 
@@ -314,7 +477,29 @@ module SiteSettingExtension
     ensure_listen_for_changes
   end
 
+  def raise_invalid_setting_access(setting_name)
+    raise SiteSettingExtension::InvalidSettingAccess.new(
+            "#{setting_name} cannot be changed like this because it is a themeable setting. Instead, use the ThemeSiteSettingManager service to manage themeable site settings.",
+          )
+  end
+
+  ##
+  # Removes an override for a setting, reverting it to the default value.
+  # This method is only called manually usually, more often than not
+  # setting overrides are removed in database migrations.
+  #
+  # Here we also handle notifying the UI of the change in the case
+  # of theme site settings and clearing relevant caches, and triggering
+  # server-side events for changed settings.
+  #
+  # Themeable site settings cannot be removed this way, they must be
+  # changed via the ThemeSiteSetting model.
+  #
+  # @param name [Symbol] the name of the setting
+  # @param val [Any] the value to set
   def remove_override!(name)
+    raise_invalid_setting_access(name) if themeable[name]
+
     old_val = current[name]
     provider.destroy(name)
     current[name] = defaults.get(name, default_locale)
@@ -328,39 +513,119 @@ module SiteSettingExtension
     end
   end
 
+  ##
+  # Adds an override, which is to say a database entry for the setting
+  # instead of using the default.
+  #
+  # The `set`, `set_and_log`, and `setting_name=` methods all call
+  # this method. Its opposite is remove_override!.
+  #
+  # Here we also handle notifying the UI of the change in the case
+  # of theme site settings and clearing relevant caches, and triggering
+  # server-side events for changed settings.
+  #
+  # Themeable site settings cannot be changed this way, they must be
+  # changed via the ThemeSiteSetting model.
+  #
+  # @param name [Symbol] the name of the setting
+  # @param val [Any] the value to set
+  #
+  # @example
+  #   SiteSetting.add_override!(:site_description, "My awesome forum")
+  #
+  # @raise [SiteSettingExtension::InvalidSettingAccess] if the setting is themeable
+  #   (themeable settings must be changed via ThemeSiteSetting model)
+  #
+  # @note When called from the Rails console, this method automatically logs the change
+  #   with the system user.
+  #
+  # @see remove_override! for removing an override and reverting to default value
   def add_override!(name, val)
+    raise_invalid_setting_access(name) if themeable[name]
+
     old_val = current[name]
     val, type = type_supervisor.to_db_value(name, val)
 
     sanitize_override = val.is_a?(String) && client_settings.include?(name)
 
     sanitized_val = sanitize_override ? sanitize_field(val) : val
+
+    if mandatory_values[name.to_sym]
+      sanitized_val =
+        (mandatory_values[name.to_sym].split("|") | sanitized_val.to_s.split("|")).join("|")
+    end
+
     provider.save(name, sanitized_val, type)
     current[name] = type_supervisor.to_rb_value(name, sanitized_val)
 
     return if current[name] == old_val
 
     clear_uploads_cache(name)
-    notify_clients!(name) if client_settings.include? name
+    notify_clients!(name) if client_settings.include?(name)
     clear_cache!
-    if old_val != current[name]
-      DiscourseEvent.trigger(:site_setting_changed, name, old_val, current[name])
+
+    if defined?(Rails::Console)
+      details = "Updated via Rails console"
+      details = DiscoursePluginRegistry.apply_modifier(:site_setting_log_details, details)
+      log(name, val, old_val, Discourse.system_user, details)
     end
+
+    DiscourseEvent.trigger(:site_setting_changed, name, old_val, current[name])
+  end
+
+  # Updates a theme-specific site setting value in memory and notifies observers.
+  #
+  # This method is used to change site settings that are marked as "themeable",
+  # which means they can have different values per theme. Unlike `add_override!`,
+  # the database isn't touched here.
+  #
+  # @param theme_id [Integer] The ID of the theme to update the setting for
+  # @param name [String, Symbol] The name of the site setting to change
+  # @param val [Object] The new "ruby" value for the site setting
+  #
+  # @example
+  #   SiteSetting.change_themeable_site_setting(5, "enable_welcome_banner", false)
+  #
+  # @note Unlike regular site settings which use add_override!, themeable settings
+  #   should be changed via the ThemeSiteSettingManager service.
+  #
+  # @see ThemeSiteSettingManager service for the higher-level implementation that handles
+  #   database persistence and logging.
+  def change_themeable_site_setting(theme_id, name, val)
+    name = name.to_sym
+
+    theme_site_settings[theme_id] ||= {}
+    old_val = theme_site_settings[theme_id][name]
+    theme_site_settings[theme_id][name] = val
+
+    notify_clients!(name, theme_id: theme_id) if client_settings.include?(name)
+
+    clear_cache!(expire_theme_site_setting_cache: true)
+
+    DiscourseEvent.trigger(:theme_site_setting_changed, name, old_val, val)
   end
 
   def notify_changed!
     MessageBus.publish("/site_settings", process: process_id)
   end
 
-  def notify_clients!(name)
-    MessageBus.publish("/client_settings", name: name, value: self.public_send(name))
+  def notify_clients!(name, scoped_to = nil)
+    MessageBus.publish(
+      "/client_settings",
+      name: name,
+      # default_locale is a special case, it is not themeable and we define
+      # a custom getter for it, so we can just use the normal getter
+      value:
+        name.to_s == "default_locale" ? self.public_send(name) : self.public_send(name, scoped_to),
+      scoped_to: scoped_to,
+    )
   end
 
   def requires_refresh?(name)
     refresh_settings.include?(name.to_sym)
   end
 
-  HOSTNAME_SETTINGS ||= %w[
+  HOSTNAME_SETTINGS = %w[
     disabled_image_download_domains
     blocked_onebox_domains
     exclude_rel_nofollow_domains
@@ -387,6 +652,8 @@ module SiteSettingExtension
 
   def set(name, value, options = nil)
     if has_setting?(name)
+      raise_invalid_setting_access(name) if themeable[name]
+
       value = filter_value(name, value)
       if options
         self.public_send("#{name}=", value, options)
@@ -401,12 +668,16 @@ module SiteSettingExtension
     end
   end
 
-  def set_and_log(name, value, user = Discourse.system_user)
+  def set_and_log(name, value, user = Discourse.system_user, detailed_message = nil)
     if has_setting?(name)
+      raise_invalid_setting_access(name) if themeable[name]
+
       prev_value = public_send(name)
+      return if prev_value == value
       set(name, value)
-      value = prev_value = "[FILTERED]" if secret_settings.include?(name.to_sym)
-      StaffActionLogger.new(user).log_site_setting_change(name, prev_value, value)
+      # Logging via the rails console is already handled in add_override!
+      log(name, value, prev_value, user, detailed_message) unless defined?(Rails::Console)
+      SiteSettingChangeResult.new(prev_value, public_send(name))
     else
       raise Discourse::InvalidParameters.new(
               I18n.t("errors.site_settings.invalid_site_setting", name: name),
@@ -414,9 +685,19 @@ module SiteSettingExtension
     end
   end
 
-  def get(name)
+  def get(name, scoped_to = nil)
     if has_setting?(name)
-      self.public_send(name)
+      if themeable[name]
+        if scoped_to.nil? || !scoped_to.key?(:theme_id) || scoped_to[:theme_id].nil?
+          raise SiteSettingExtension::InvalidSettingAccess.new(
+                  "#{name} requires a theme_id because it is themeable",
+                )
+        else
+          self.public_send(name, scoped_to)
+        end
+      else
+        self.public_send(name)
+      end
     else
       raise Discourse::InvalidParameters.new(
               I18n.t("errors.site_settings.invalid_site_setting", name: name),
@@ -440,10 +721,15 @@ module SiteSettingExtension
     end
   end
 
+  def valid_areas
+    Set.new(SiteSetting::VALID_AREAS | DiscoursePluginRegistry.site_setting_areas.to_a)
+  end
+
   protected
 
-  def clear_cache!
+  def clear_cache!(expire_theme_site_setting_cache: false)
     Discourse.cache.delete(SiteSettingExtension.client_settings_cache_key)
+    Theme.expire_site_setting_cache! if expire_theme_site_setting_cache
     Site.clear_anon_cache!
   end
 
@@ -463,11 +749,11 @@ module SiteSettingExtension
   def setup_shadowed_methods(name, value)
     clean_name = name.to_s.sub("?", "").to_sym
 
-    define_singleton_method clean_name do
+    define_singleton_method clean_name do |scoped_to = nil|
       value
     end
 
-    define_singleton_method "#{clean_name}?" do
+    define_singleton_method "#{clean_name}?" do |scoped_to = nil|
       value
     end
 
@@ -485,7 +771,15 @@ module SiteSettingExtension
     clean_name = name.to_s.sub("?", "").to_sym
 
     if type_supervisor.get_type(name) == :uploaded_image_list
-      define_singleton_method clean_name do
+      define_singleton_method clean_name do |scoped_to = nil|
+        if themeable[clean_name]
+          if scoped_to.nil? || !scoped_to.key?(:theme_id) || scoped_to[:theme_id].nil?
+            raise SiteSettingExtension::InvalidSettingAccess.new(
+                    "#{clean_name} requires a theme_id because it is themeable",
+                  )
+          end
+        end
+
         uploads_list = uploads[name]
         return uploads_list if uploads_list
 
@@ -501,7 +795,15 @@ module SiteSettingExtension
         uploads[name] = uploads_list if uploads_list
       end
     elsif type_supervisor.get_type(name) == :upload
-      define_singleton_method clean_name do
+      define_singleton_method clean_name do |scoped_to = nil|
+        if themeable[clean_name]
+          if scoped_to.nil? || !scoped_to.key?(:theme_id) || scoped_to[:theme_id].nil?
+            raise SiteSettingExtension::InvalidSettingAccess.new(
+                    "#{clean_name} requires a theme_id because it is themeable",
+                  )
+          end
+        end
+
         upload = uploads[name]
         return upload if upload
 
@@ -518,18 +820,35 @@ module SiteSettingExtension
         end
       end
     else
-      define_singleton_method clean_name do
+      define_singleton_method clean_name do |scoped_to = nil|
+        if themeable[clean_name]
+          if scoped_to.nil? || !scoped_to.key?(:theme_id) || scoped_to[:theme_id].nil?
+            raise SiteSettingExtension::InvalidSettingAccess.new(
+                    "#{clean_name} requires a theme_id because it is themeable",
+                  )
+          end
+
+          # If the theme hasn't overridden any theme site settings (or changed defaults)
+          # then we will just fall back further down bellow to the current site setting value.
+          settings_overridden_for_theme = theme_site_settings[scoped_to[:theme_id]]
+          if settings_overridden_for_theme && settings_overridden_for_theme.key?(clean_name)
+            return settings_overridden_for_theme[clean_name]
+          end
+        end
+
         if plugins[name]
           plugin = Discourse.plugins_by_name[plugins[name]]
           return false if !plugin.configurable? && plugin.enabled_site_setting == name
         end
 
-        if (c = current[name]).nil?
-          refresh!
-          current[name]
-        else
-          c
+        refresh! if current[name].nil?
+
+        value = current[name]
+
+        if mandatory_values[name]
+          return (mandatory_values[name].split("|") | value.to_s.split("|")).join("|")
         end
+        value
       end
     end
 
@@ -542,23 +861,25 @@ module SiteSettingExtension
       end
     end
 
-    # Same logic as above for group_list settings, with the caveat that normal
+    # Same logic as above for other list type settings, with the caveat that normal
     # list settings are not necessarily integers, so we just want to handle the splitting.
-    if type_supervisor.get_type(name) == :list
+    if %i[list emoji_list tag_list].include?(type_supervisor.get_type(name))
       list_type = type_supervisor.get_list_type(name)
 
       if %w[simple compact].include?(list_type) || list_type.nil?
-        define_singleton_method("#{clean_name}_map") do
-          self.public_send(clean_name).to_s.split("|")
+        define_singleton_method("#{clean_name}_map") do |scoped_to = nil|
+          self.public_send(clean_name, scoped_to).to_s.split("|")
         end
       end
     end
 
-    define_singleton_method "#{clean_name}?" do
-      self.public_send clean_name
+    define_singleton_method "#{clean_name}?" do |scoped_to = nil|
+      self.public_send(clean_name, scoped_to)
     end
 
     define_singleton_method "#{clean_name}=" do |val|
+      raise_invalid_setting_access(clean_name) if themeable[clean_name]
+
       add_override!(name, val)
     end
   end
@@ -597,8 +918,29 @@ module SiteSettingExtension
     mutex.synchronize do
       defaults.load_setting(name, default, opts.delete(:locale_default))
 
+      mandatory_values[name] = opts[:mandatory_values] if opts[:mandatory_values]
+
+      requires_confirmation_settings[name] = (
+        if SiteSettings::TypeSupervisor::REQUIRES_CONFIRMATION_TYPES.values.include?(
+             opts[:requires_confirmation],
+           )
+          opts[:requires_confirmation]
+        end
+      )
+
       categories[name] = opts[:category] || :uncategorized
 
+      themeable[name] = opts[:themeable] ? true : false
+
+      if opts[:area]
+        split_areas = opts[:area].split("|")
+        if split_areas.any? { |area| !SiteSetting.valid_areas.include?(area) }
+          raise Discourse::InvalidParameters.new(
+                  "Area is invalid, valid areas are: #{SiteSetting.valid_areas.join(", ")}",
+                )
+        end
+        areas[name] = split_areas
+      end
       hidden_settings_provider.add_hidden(name) if opts[:hidden]
 
       if GlobalSetting.respond_to?(name)
@@ -632,6 +974,17 @@ module SiteSettingExtension
         setup_methods(name)
       end
     end
+  end
+
+  def log(name, value, prev_value, user = Discourse.system_user, detailed_message = nil)
+    value = prev_value = "[FILTERED]" if secret_settings.include?(name.to_sym)
+    return if hidden_settings.include?(name.to_sym)
+    StaffActionLogger.new(user).log_site_setting_change(
+      name,
+      prev_value,
+      value,
+      { details: detailed_message }.compact_blank,
+    )
   end
 
   def default_uploads

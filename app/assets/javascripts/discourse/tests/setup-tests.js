@@ -1,24 +1,26 @@
 /* eslint-disable simple-import-sort/imports */
+import Application from "../app";
 import "./loader-shims";
+import "discourse/static/markdown-it";
 /* eslint-enable simple-import-sort/imports */
 
-import { getOwner } from "@ember/application";
+import { getOwner } from "@ember/owner";
 import {
   getSettledState,
   isSettled,
   setApplication,
   setResolver,
 } from "@ember/test-helpers";
-import "bootstrap/js/modal";
-import bootbox from "bootbox";
-import { addModuleExcludeMatcher } from "ember-cli-test-loader/test-support/index";
 import $ from "jquery";
 import MessageBus from "message-bus-client";
 import QUnit from "qunit";
 import sinon from "sinon";
 import PreloadStore from "discourse/lib/preload-store";
 import { resetSettings as resetThemeSettings } from "discourse/lib/theme-settings-store";
-import { ScrollingDOMMethods } from "discourse/mixins/scrolling";
+import {
+  disableLoadMoreObserver,
+  enableLoadMoreObserver,
+} from "discourse/components/load-more";
 import Session from "discourse/models/session";
 import User from "discourse/models/user";
 import { resetCategoryCache } from "discourse/models/category";
@@ -41,42 +43,17 @@ import {
 } from "discourse/tests/helpers/qunit-helpers";
 import { configureRaiseOnDeprecation } from "discourse/tests/helpers/raise-on-deprecation";
 import { resetSettings } from "discourse/tests/helpers/site-settings";
-import { disableCloaking } from "discourse/widgets/post-stream";
-import deprecated from "discourse-common/lib/deprecated";
-import { setDefaultOwner } from "discourse-common/lib/get-owner";
-import { setupS3CDN, setupURL } from "discourse-common/lib/get-url";
-import { buildResolver } from "discourse-common/resolver";
-import Application from "../app";
+import { disableCloaking } from "discourse/modifiers/post-stream-viewport-tracker";
+import { disableCloaking as disableWidgetCloaking } from "discourse/widgets/post-stream";
+import deprecated from "discourse/lib/deprecated";
+import { setDefaultOwner } from "discourse/lib/get-owner";
+import { setupS3CDN, setupURL } from "discourse/lib/get-url";
+import { buildResolver } from "discourse/resolver";
 import { loadSprites } from "../lib/svg-sprite-loader";
+import * as FakerModule from "@faker-js/faker";
+import { setLoadedFaker } from "discourse/lib/load-faker";
 
-const Plugin = $.fn.modal;
-const Modal = Plugin.Constructor;
 let cancelled = false;
-
-function AcceptanceModal(option, _relatedTarget) {
-  return this.each(function () {
-    let $this = $(this);
-    let data = $this.data("bs.modal");
-    let options = Object.assign(
-      {},
-      Modal.DEFAULTS,
-      $this.data(),
-      typeof option === "object" && option
-    );
-
-    if (!data) {
-      $this.data("bs.modal", (data = new Modal(this, options)));
-    }
-    data.$body = $("#ember-testing");
-
-    if (typeof option === "string") {
-      data[option](_relatedTarget);
-    } else if (options.show) {
-      data.show(_relatedTarget);
-    }
-  });
-}
-
 let started = false;
 
 function createApplication(config, settings) {
@@ -178,6 +155,8 @@ function setupToolbar() {
     select.value ||= "core";
     select.querySelector("option:not([value])").remove();
     select.querySelector("option[value=-----]").disabled = true;
+    select.querySelector("option[value=plugins]").innerText =
+      "all plugins (not recommended)";
     select.querySelector("option[value=all]").innerText =
       "all (not recommended)";
   });
@@ -229,18 +208,28 @@ function writeSummaryLine(message) {
 
 export default function setupTests(config) {
   disableCloaking();
+  disableWidgetCloaking();
 
   setupDeprecationCounter(QUnit);
 
   QUnit.config.hidepassed = true;
   QUnit.config.testTimeout = 60_000;
 
+  window.onunhandledrejection = (event) => {
+    // reports test boot failures to testem, so the browser doesn't hang forever
+    window.Testem?.emit(
+      "top-level-error",
+      String(event.reason),
+      window.location.href,
+      "0"
+    );
+  };
+
   sinon.config = {
     injectIntoThis: false,
     injectInto: null,
     properties: ["spy", "stub", "mock", "clock", "sandbox"],
     useFakeTimers: true,
-    useFakeServer: false,
   };
 
   // Stop the message bus so we don't get ajax calls
@@ -252,8 +241,6 @@ export default function setupTests(config) {
   } else {
     window.Logster = { enabled: false };
   }
-
-  $.fn.modal = AcceptanceModal;
 
   Object.defineProperty(window, "exists", {
     get() {
@@ -278,7 +265,6 @@ export default function setupTests(config) {
 
   let app;
   QUnit.testStart(function (ctx) {
-    bootbox.$body = $("#ember-testing");
     let settings = resetSettings();
     resetThemeSettings();
 
@@ -336,9 +322,12 @@ export default function setupTests(config) {
 
     resetCategoryCache();
 
-    sinon.stub(ScrollingDOMMethods, "screenNotFull");
-    sinon.stub(ScrollingDOMMethods, "bindOnScroll");
-    sinon.stub(ScrollingDOMMethods, "unbindOnScroll");
+    // Access the container that's set up in createApplication
+    const scrollManager = app.__container__.lookup("service:scroll-manager");
+    sinon.stub(scrollManager, "bindScrolling");
+    sinon.stub(scrollManager, "unbindScrolling");
+
+    disableLoadMoreObserver();
   });
 
   QUnit.testDone(function () {
@@ -348,10 +337,6 @@ export default function setupTests(config) {
     resetPretender();
     clearPresenceState();
 
-    // Clean up the DOM. Some tests might leave extra classes or elements behind.
-    Array.from(document.getElementsByClassName("modal-backdrop")).forEach((e) =>
-      e.remove()
-    );
     document.body.removeAttribute("class");
     let html = document.documentElement;
     html.removeAttribute("class");
@@ -368,6 +353,7 @@ export default function setupTests(config) {
 
     MessageBus.unsubscribe("*");
     localStorage.clear();
+    enableLoadMoreObserver();
   });
 
   if (getUrlParameter("qunit_disable_auto_start") === "1") {
@@ -392,32 +378,6 @@ export default function setupTests(config) {
   const hasPluginJs = !!document.querySelector("script[data-discourse-plugin]");
   const hasThemeJs = !!document.querySelector("script[data-theme-id]");
 
-  const shouldLoadModule = (name) => {
-    if (!/\-test/.test(name)) {
-      return false;
-    }
-
-    const isPlugin = name.match(/\/plugins\//);
-    const isTheme = name.match(/\/theme-\d+\//);
-    const isCore = !isPlugin && !isTheme;
-    const pluginName = name.match(/\/plugins\/([\w-]+)\//)?.[1];
-
-    const loadCore = target === "core" || target === "all";
-    const loadAllPlugins = target === "plugins" || target === "all";
-
-    if (hasThemeJs) {
-      return isTheme;
-    } else if (isCore && !loadCore) {
-      return false;
-    } else if (isPlugin && !(loadAllPlugins || pluginName === target)) {
-      return false;
-    }
-
-    return true;
-  };
-
-  addModuleExcludeMatcher((name) => !shouldLoadModule(name));
-
   // forces 0 as duration for all jquery animations
   $.fx.off = true;
 
@@ -432,6 +392,8 @@ export default function setupTests(config) {
       "fontawesome"
     );
   }
+
+  setLoadedFaker(FakerModule);
 
   if (!hasPluginJs && !hasThemeJs) {
     configureRaiseOnDeprecation();

@@ -2,6 +2,9 @@ import Component from "@glimmer/component";
 import { assert } from "@ember/debug";
 import { dasherize } from "@ember/string";
 import { htmlSafe } from "@ember/template";
+import { or } from "truth-helpers";
+import PluginOutlet from "discourse/components/plugin-outlet";
+import lazyHash from "discourse/helpers/lazy-hash";
 import fields from "./fields";
 
 export default class WizardFieldComponent extends Component {
@@ -40,7 +43,7 @@ export default class WizardFieldComponent extends Component {
 
   <template>
     <div class={{this.classes}}>
-      {{#if @field.label}}
+      {{#if (or @field.label @field.description)}}
         <label for={{@field.id}}>
           <span class="wizard-container__label">
             {{@field.label}}
@@ -77,7 +80,25 @@ export default class WizardFieldComponent extends Component {
         <div class="wizard-container__description extra">
           {{htmlSafe this.field.extraDescription}}
         </div>
+
+        <PluginOutlet
+          @name="below-wizard-extra-description"
+          @outletArgs={{lazyHash
+            id=@field.id
+            disabled=@field.disabled
+            value=@field.value
+          }}
+        />
       {{/if}}
+
+      <PluginOutlet
+        @name="below-wizard-field"
+        @outletArgs={{lazyHash
+          id=@field.id
+          disabled=@field.disabled
+          value=@field.value
+        }}
+      />
     </div>
   </template>
 }

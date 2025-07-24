@@ -1,7 +1,10 @@
 # frozen_string_literal: true
 
 RSpec.describe "Local Dates" do
-  before { freeze_time DateTime.parse("2018-11-10 12:00") }
+  before do
+    SiteSetting.discourse_local_dates_email_format = "YYYY-MM-DDTHH:mm:ss[Z] z"
+    freeze_time DateTime.parse("2018-11-10 12:00")
+  end
 
   it "should work without timezone" do
     post = Fabricate(:post, raw: <<~MD)
@@ -29,6 +32,15 @@ RSpec.describe "Local Dates" do
     cooked = post.cooked
 
     expect(cooked).to include('data-timezone="Asia/Calcutta"')
+    expect(cooked).to include("05/08/2018 4:30:00 PM")
+
+    post = Fabricate(:post, raw: <<~MD)
+      [date=2018-05-08 time=22:00 format="L LTS" timezone="IST"]
+    MD
+
+    cooked = post.cooked
+
+    expect(cooked).to include('data-timezone="IST"')
     expect(cooked).to include("05/08/2018 4:30:00 PM")
   end
 

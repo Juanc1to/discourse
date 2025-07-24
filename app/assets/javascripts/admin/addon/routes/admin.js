@@ -1,35 +1,38 @@
 import { tracked } from "@glimmer/tracking";
-import { inject as service } from "@ember/service";
-import {
-  ADMIN_PANEL,
-  COMBINED_MODE,
-  MAIN_PANEL,
-  SEPARATED_MODE,
-} from "discourse/lib/sidebar/panels";
+import { service } from "@ember/service";
+import KeyboardShortcuts, {
+  PLATFORM_KEY_MODIFIER,
+} from "discourse/lib/keyboard-shortcuts";
 import DiscourseRoute from "discourse/routes/discourse";
-import I18n from "discourse-i18n";
+import { i18n } from "discourse-i18n";
+import AdminSearchModal from "admin/components/modal/admin-search";
 
 export default class AdminRoute extends DiscourseRoute {
   @service sidebarState;
   @service siteSettings;
+  @service store;
   @service currentUser;
+  @service adminSidebarStateManager;
+  @service modal;
+
   @tracked initialSidebarState;
 
   titleToken() {
-    return I18n.t("admin_title");
+    return i18n("admin_title");
   }
 
   activate() {
-    if (this.currentUser.use_admin_sidebar) {
-      this.initialSidebarState = {
-        mode: this.sidebarState.mode,
-        displaySwitchPanelButtons: this.sidebarState.displaySwitchPanelButtons,
-      };
+    KeyboardShortcuts.addShortcut(
+      `${PLATFORM_KEY_MODIFIER}+/`,
+      (event) => this.showAdminSearchModal(event),
+      {
+        global: true,
+      }
+    );
 
-      this.sidebarState.setPanel(ADMIN_PANEL);
-      this.sidebarState.setSeparatedMode();
-      this.sidebarState.hideSwitchPanelButtons();
-    }
+    this.adminSidebarStateManager.maybeForceAdminSidebar({
+      onlyIfAlreadyActive: false,
+    });
 
     this.controllerFor("application").setProperties({
       showTop: false,
@@ -39,22 +42,18 @@ export default class AdminRoute extends DiscourseRoute {
   deactivate(transition) {
     this.controllerFor("application").set("showTop", true);
 
-    if (this.currentUser.use_admin_sidebar) {
-      if (!transition?.to.name.startsWith("admin")) {
-        if (this.initialSidebarState.mode === SEPARATED_MODE) {
-          this.sidebarState.setSeparatedMode();
-        } else if (this.initialSidebarState.mode === COMBINED_MODE) {
-          this.sidebarState.setCombinedMode();
-        }
+    KeyboardShortcuts.unbind({
+      [`${PLATFORM_KEY_MODIFIER}+/`]: this.showAdminSearchModal,
+    });
 
-        if (this.initialSidebarState.displaySwitchPanelButtons) {
-          this.sidebarState.showSwitchPanelButtons();
-        } else {
-          this.sidebarState.hideSwitchPanelButtons();
-        }
-
-        this.sidebarState.setPanel(MAIN_PANEL);
-      }
+    if (!transition?.to.name.startsWith("admin")) {
+      this.adminSidebarStateManager.stopForcingAdminSidebar();
     }
+  }
+
+  showAdminSearchModal(event) {
+    event.preventDefault();
+    event.stopPropagation();
+    this.modal.show(AdminSearchModal);
   }
 }

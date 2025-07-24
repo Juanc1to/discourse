@@ -190,8 +190,6 @@ RSpec.describe EmbedController do
     context "with a host" do
       fab!(:embeddable_host)
 
-      before { Jobs.run_immediately! }
-
       it "doesn't raise an error with no referer" do
         get "/embed/comments", params: { embed_url: embed_url }
 
@@ -246,6 +244,8 @@ RSpec.describe EmbedController do
       end
 
       context "with success" do
+        before { Jobs.run_immediately! }
+
         it "tells the topic retriever to work when no previous embed is found" do
           TopicRetriever.any_instance.expects(:retrieve)
 
@@ -331,7 +331,7 @@ RSpec.describe EmbedController do
     end
 
     context "with multiple hosts" do
-      fab!(:embeddable_host_1) { Fabricate(:embeddable_host) }
+      fab!(:embeddable_host_1, :embeddable_host)
       fab!(:embeddable_host_2) { Fabricate(:embeddable_host, host: "http://discourse.org") }
       fab!(:embeddable_host_3) do
         Fabricate(:embeddable_host, host: "https://example.com/1234", class_name: "example")

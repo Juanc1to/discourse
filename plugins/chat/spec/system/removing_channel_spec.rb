@@ -1,7 +1,7 @@
 # frozen_string_literal: true
 
 RSpec.describe "Removing channel", type: :system do
-  fab!(:current_user) { Fabricate(:user) }
+  fab!(:current_user, :user)
 
   let(:chat_page) { PageObjects::Pages::Chat.new }
   let(:chat_sidebar_page) { PageObjects::Pages::Sidebar.new }
@@ -12,7 +12,7 @@ RSpec.describe "Removing channel", type: :system do
   end
 
   context "when removing last followed channel" do
-    fab!(:channel_1) { Fabricate(:chat_channel) }
+    fab!(:channel_1, :chat_channel)
     fab!(:channel_2) { Fabricate(:direct_message_channel, users: [current_user, Fabricate(:user)]) }
 
     before do
@@ -33,10 +33,13 @@ RSpec.describe "Removing channel", type: :system do
   end
 
   context "when removing channel" do
-    fab!(:channel_1) { Fabricate(:chat_channel) }
+    fab!(:channel_1, :chat_channel)
     fab!(:channel_2) { Fabricate(:direct_message_channel, users: [current_user, Fabricate(:user)]) }
 
-    before { channel_1.add(current_user) }
+    before do
+      current_user.upsert_custom_fields(::Chat::LAST_CHAT_CHANNEL_ID => channel_1.id)
+      channel_1.add(current_user)
+    end
 
     it "redirects to another followed channgel" do
       chat_page.visit_channel(channel_2)

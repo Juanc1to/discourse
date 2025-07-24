@@ -1,15 +1,23 @@
 import { cancel } from "@ember/runloop";
-import Service, { inject as service } from "@ember/service";
+import Service, { service } from "@ember/service";
 
 export default class ChatDraftsManager extends Service {
   @service chatApi;
 
   drafts = {};
 
-  async add(message, channelId, threadId) {
+  willDestroy() {
+    super.willDestroy(...arguments);
+    cancel(this._persistHandler);
+  }
+
+  async add(message, channelId, threadId, persist = true) {
     try {
       this.drafts[this.key(channelId, threadId)] = message;
-      await this.persistDraft(message, channelId, threadId);
+
+      if (persist) {
+        await this.persistDraft(message, channelId, threadId);
+      }
     } catch (e) {
       // eslint-disable-next-line no-console
       console.log("Couldn't save draft", e);
@@ -42,12 +50,8 @@ export default class ChatDraftsManager extends Service {
         threadId,
       });
       message.draftSaved = true;
-    } catch (e) {
+    } catch {
       // We don't want to throw an error if the draft fails to save
     }
-  }
-
-  willDestroy() {
-    cancel(this?._persistHandler);
   }
 }

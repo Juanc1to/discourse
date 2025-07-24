@@ -30,6 +30,7 @@ module Oneboxer
       "http://vimeo.com",
       "https://www.youtube.com",
       "https://twitter.com",
+      "https://x.com",
       Discourse.base_url,
     ]
   end
@@ -62,11 +63,6 @@ module Oneboxer
   def self.force_get_hosts
     hosts = []
     hosts += SiteSetting.force_get_hosts.split("|").collect { |domain| "https://#{domain}" }
-    hosts +=
-      SiteSetting
-        .cache_onebox_response_body_domains
-        .split("|")
-        .collect { |domain| "https://www.#{domain}" }
     hosts += amazon_domains
 
     hosts.uniq
@@ -125,36 +121,6 @@ module Oneboxer
     Discourse.cache.delete(onebox_failed_cache_key(url))
   end
 
-  def self.cache_response_body?(uri)
-    uri = URI.parse(uri) if uri.is_a?(String)
-
-    if SiteSetting.cache_onebox_response_body?
-      SiteSetting
-        .cache_onebox_response_body_domains
-        .split("|")
-        .any? { |domain| uri.hostname.ends_with?(domain) }
-    end
-  end
-
-  def self.cache_response_body(uri, response)
-    key = redis_cached_response_body_key(uri)
-    Discourse.redis.without_namespace.setex(key, 1.minutes.to_i, response)
-  end
-
-  def self.cached_response_body_exists?(uri)
-    key = redis_cached_response_body_key(uri)
-    Discourse.redis.without_namespace.exists(key).to_i > 0
-  end
-
-  def self.fetch_cached_response_body(uri)
-    key = redis_cached_response_body_key(uri)
-    Discourse.redis.without_namespace.get(key)
-  end
-
-  def self.redis_cached_response_body_key(uri)
-    "CACHED_RESPONSE_#{uri}"
-  end
-
   # Parse URLs out of HTML, returning the document when finished.
   def self.each_onebox_link(doc, extra_paths: [])
     onebox_links = doc.css("a.#{ONEBOX_CSS_CLASS}", *extra_paths)
@@ -165,7 +131,7 @@ module Oneboxer
     doc
   end
 
-  HTML5_BLOCK_ELEMENTS ||= %w[
+  HTML5_BLOCK_ELEMENTS = %w[
     address
     article
     aside
@@ -479,8 +445,12 @@ module Oneboxer
   def self.local_category_html(url, route)
     return unless route[:category_slug_path_with_id]
     category = Category.find_by_slug_path_with_id(route[:category_slug_path_with_id])
+    guardian = Guardian.new
 
-    if Guardian.new.can_see_category?(category)
+    if guardian.can_see_category?(category)
+      subcategories =
+        category.subcategories.select { |subcategory| guardian.can_see_category?(subcategory) }
+
       args = {
         url: category.url,
         name: category.name,
@@ -489,7 +459,7 @@ module Oneboxer
         description: Onebox::Helpers.sanitize(category.description),
         has_subcategories: category.subcategories.present?,
         subcategories:
-          category.subcategories.collect { |sc| { name: sc.name, color: sc.color, url: sc.url } },
+          subcategories.collect { |sc| { name: sc.name, color: sc.color, url: sc.url } },
       }
 
       Mustache.render(template("discourse_category_onebox"), args)
@@ -556,16 +526,10 @@ module Oneboxer
           hostname: GlobalSetting.hostname,
           facebook_app_access_token: SiteSetting.facebook_app_access_token,
           disable_media_download_controls: SiteSetting.disable_onebox_media_download_controls,
-          body_cacher: self,
           content_type: fd.content_type,
         }
 
         onebox_options[:cookie] = fd.cookie if fd.cookie
-
-        user_agent_override = SiteSetting.cache_onebox_user_agent if Oneboxer.cache_response_body?(
-          url,
-        ) && SiteSetting.cache_onebox_user_agent.present?
-        onebox_options[:user_agent] = user_agent_override if user_agent_override
 
         preview_result = Onebox.preview(uri.to_s, onebox_options)
         result = {
@@ -677,9 +641,20 @@ module Oneboxer
       force_custom_user_agent_hosts: force_custom_user_agent_hosts,
       preserve_fragment_url_hosts: preserve_fragment_url_hosts,
       timeout: 5,
+      headers: {
+        "Accept-Language" => accept_language,
+      },
     }
 
     uri = URI(url)
+
+    # For private GitHub repos, we get a 404 when trying to use
+    # FinalDestination to request the final URL because no auth headers
+    # are sent. In this case we can ignore redirects and go straight to
+    # using Onebox.preview
+    if SiteSetting.github_onebox_access_tokens.present? && uri.hostname == "github.com"
+      fd_options[:ignore_redirects] << "https://github.com"
+    end
 
     strategy = Oneboxer.ordered_strategies(uri.hostname).shift if strategy.blank?
 
@@ -690,11 +665,18 @@ module Oneboxer
       fd_options[:force_custom_user_agent_hosts] = ["https://#{uri.hostname}"]
     end
 
-    user_agent_override = SiteSetting.cache_onebox_user_agent if Oneboxer.cache_response_body?(
-      url,
-    ) && SiteSetting.cache_onebox_user_agent.present?
-    fd_options[:default_user_agent] = user_agent_override if user_agent_override
-
     fd_options
+  end
+
+  def self.onebox_locale
+    SiteSetting.onebox_locale.presence || SiteSetting.default_locale
+  end
+
+  def self.accept_language
+    if onebox_locale == "en"
+      "en;q=0.9, *;q=0.5"
+    else
+      "#{onebox_locale.gsub(/_/, "-")};q=0.9, en;q=0.8, *;q=0.5"
+    end
   end
 end

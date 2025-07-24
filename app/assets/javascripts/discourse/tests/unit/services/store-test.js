@@ -1,4 +1,4 @@
-import { getOwner } from "@ember/application";
+import { getOwner } from "@ember/owner";
 import { setupTest } from "ember-qunit";
 import { module, test } from "qunit";
 import pretender, {
@@ -272,6 +272,24 @@ module("Unit | Service | store", function (hooks) {
       fruit.other_fruit_ids,
       { apple: 1, banana: 2 },
       "embedded record remains unhydrated"
+    );
+  });
+
+  test("hydrateEmbedded", async function (assert) {
+    const store = getOwner(this).lookup("service:store");
+    const things = await store.findAll("complex_thing");
+    const thing = things.content[0];
+
+    assert.propContains(
+      thing.foos[0],
+      { id: 1, name: "foo1" },
+      "it hydrates the embedded records"
+    );
+
+    assert.deepEqual(
+      thing.bar_ids,
+      [5, 6, 7, 8],
+      "it won't delete unhydrated ids"
     );
   });
 });

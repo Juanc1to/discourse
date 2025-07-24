@@ -1,8 +1,6 @@
 # frozen_string_literal: true
 
-require "post_revisor"
-
-RSpec.describe PostRevisor do
+describe PostRevisor do
   fab!(:topic)
   fab!(:newuser) { Fabricate(:newuser, last_seen_at: Date.today) }
   fab!(:user) { Fabricate(:user, refresh_auto_groups: true) }
@@ -233,7 +231,10 @@ RSpec.describe PostRevisor do
       fab!(:tag1) { Fabricate(:tag, name: "First tag") }
       fab!(:tag2) { Fabricate(:tag, name: "Second tag") }
 
-      before { SiteSetting.create_post_for_category_and_tag_changes = true }
+      before do
+        SiteSetting.create_post_for_category_and_tag_changes = true
+        SiteSetting.whispers_allowed_groups = Group::AUTO_GROUPS[:staff]
+      end
 
       it "Creates a small_action post with correct translation when both adding and removing tags" do
         post.topic.update!(tags: [tag1])
@@ -292,8 +293,18 @@ RSpec.describe PostRevisor do
         )
       end
 
+      it "Creates a small_action as a whisper when category is changed" do
+        category = Fabricate(:category)
+
+        expect { post_revisor.revise!(admin, category_id: category.id) }.to change {
+          Post.where(topic_id: post.topic_id, action_code: "category_changed").count
+        }.by(1)
+
+        expect(post.topic.ordered_posts.last.post_type).to eq(Post.types[:whisper])
+      end
+
       describe "with PMs" do
-        fab!(:pm) { Fabricate(:private_message_topic) }
+        fab!(:pm, :private_message_topic)
         let(:first_post) { create_post(user: admin, topic: pm, allow_uncategorized_topics: false) }
         fab!(:category) { Fabricate(:category, topic_count: 1) }
         it "Does not create a category change small_action post when converting to a topic" do
@@ -305,11 +316,27 @@ RSpec.describe PostRevisor do
     end
   end
 
-  describe "revise wiki" do
-    # There used to be a bug where wiki changes were considered posting "too similar"
-    # so this is enabled and checked
-    use_redis_snapshotting
+  describe "editing locale" do
+    it "updates the post's locale" do
+      post = Fabricate(:post)
 
+      PostRevisor.new(post).revise!(post.user, locale: "ja")
+
+      post.reload
+      expect(post.locale).to eq("ja")
+    end
+
+    it "also updates the topic's locale if first post" do
+      post = Fabricate(:post)
+
+      PostRevisor.new(post).revise!(post.user, locale: "ja")
+
+      post.reload
+      expect(post.topic.locale).to eq("ja")
+    end
+  end
+
+  describe "revise wiki" do
     before { SiteSetting.unique_posts_mins = 10 }
 
     it "allows the user to change it to a wiki" do
@@ -484,7 +511,7 @@ RSpec.describe PostRevisor do
 
         post = Fabricate(:post, raw: "hello world")
 
-        Fabricate(:flag, post: post, user: user)
+        Fabricate(:flag_post_action, post: post, user: user)
 
         revisor = PostRevisor.new(post)
         revisor.revise!(
@@ -803,8 +830,6 @@ RSpec.describe PostRevisor do
         SiteSetting.editing_grace_period = 0
       end
 
-      use_redis_snapshotting
-
       it "triggers a rate limiter" do
         EditRateLimiter.any_instance.expects(:performed!)
         post_revisor.revise!(changed_by, raw: "updated body")
@@ -854,7 +879,7 @@ RSpec.describe PostRevisor do
     end
 
     describe "admin editing a new user's post" do
-      fab!(:changed_by) { Fabricate(:admin, refresh_auto_groups: true) }
+      fab!(:changed_by, :admin)
 
       before do
         SiteSetting.newuser_max_embedded_media = 0
@@ -1091,8 +1116,9 @@ RSpec.describe PostRevisor do
 
     context "when logging group moderator edits" do
       fab!(:group_user)
-      fab!(:category) do
-        Fabricate(:category, reviewable_by_group_id: group_user.group.id, topic: topic)
+      fab!(:category) { Fabricate(:category, topic: topic) }
+      fab!(:category_moderation_group) do
+        Fabricate(:category_moderation_group, category:, group: group_user.group)
       end
 
       before do
@@ -1185,7 +1211,7 @@ RSpec.describe PostRevisor do
     end
 
     context "with alerts" do
-      fab!(:mentioned_user) { Fabricate(:user) }
+      fab!(:mentioned_user, :user)
 
       before { Jobs.run_immediately! }
 
@@ -1449,9 +1475,9 @@ RSpec.describe PostRevisor do
           end
 
           context "with required tag group" do
-            fab!(:tag1) { Fabricate(:tag) }
-            fab!(:tag2) { Fabricate(:tag) }
-            fab!(:tag3) { Fabricate(:tag) }
+            fab!(:tag1, :tag)
+            fab!(:tag2, :tag)
+            fab!(:tag3, :tag)
             fab!(:tag_group) { Fabricate(:tag_group, tags: [tag1, tag2]) }
             fab!(:category) do
               Fabricate(

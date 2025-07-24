@@ -2,7 +2,7 @@
 
 RSpec.describe UserDestroyer do
   fab!(:user) { Fabricate(:user_with_secondary_email, refresh_auto_groups: true) }
-  fab!(:admin) { Fabricate(:admin, refresh_auto_groups: true) }
+  fab!(:admin)
 
   describe ".new" do
     it "raises an error when user is nil" do
@@ -81,10 +81,15 @@ RSpec.describe UserDestroyer do
 
       include_examples "successfully destroy a user"
 
-      it "should log proper context" do
+      it "logs context in default locale" do
+        I18n.locale = :ja
+        SiteSetting.default_locale = :de
+
         destroy
         expect(UserHistory.where(action: UserHistory.actions[:delete_user]).last.context).to eq(
-          I18n.t("staff_action_logs.user_delete_self", url: "/u/username/preferences/account"),
+          I18n.with_locale(:de) do
+            I18n.t("staff_action_logs.user_delete_self", url: "/u/username/preferences/account")
+          end,
         )
       end
     end

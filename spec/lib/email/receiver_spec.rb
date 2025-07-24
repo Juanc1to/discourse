@@ -7,6 +7,8 @@ RSpec.describe Email::Receiver do
     SiteSetting.email_in = true
     SiteSetting.reply_by_email_address = "reply+%{reply_key}@bar.com"
     SiteSetting.alternative_reply_by_email_addresses = "alt+%{reply_key}@bar.com"
+    SiteSetting.manual_polling_enabled = true
+    SiteSetting.reply_by_email_enabled = true
   end
 
   def process(email_name, opts = {})
@@ -71,13 +73,12 @@ RSpec.describe Email::Receiver do
     user = Fabricate(:user, email: "staged@bar.com", active: false, staged: true)
     post = Fabricate(:post)
 
-    post_reply_key =
-      Fabricate(
-        :post_reply_key,
-        user: user,
-        post: post,
-        reply_key: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-      )
+    Fabricate(
+      :post_reply_key,
+      user: user,
+      post: post,
+      reply_key: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    )
 
     expect { process(:staged_sender) }.not_to raise_error
   end
@@ -91,9 +92,9 @@ RSpec.describe Email::Receiver do
 
     topic = Fabricate(:topic)
     post = Fabricate(:post, topic: topic)
-    user = Fabricate(:user, email: "discourse@bar.com")
+    Fabricate(:user, email: "discourse@bar.com")
 
-    mail = email(:old_destination).gsub("424242", topic.id.to_s)
+    mail = email(:old_destination).gsub(":post_id", post.id.to_s)
     expect { Email::Receiver.new(mail).process! }.to raise_error(
       Email::Receiver::BadDestinationAddress,
     )
@@ -219,9 +220,7 @@ RSpec.describe Email::Receiver do
   end
 
   it "strips null bytes from the subject" do
-    expect do process(:null_byte_in_subject) end.to raise_error(
-      Email::Receiver::BadDestinationAddress,
-    )
+    expect { process(:null_byte_in_subject) }.to raise_error(Email::Receiver::BadDestinationAddress)
   end
 
   describe "bounces to VERP" do
@@ -418,9 +417,43 @@ RSpec.describe Email::Receiver do
     it "automatically elides gmail quotes" do
       SiteSetting.always_show_trimmed_content = true
       expect { process(:gmail_html_reply) }.to change { topic.posts.count }
-      expect(topic.posts.last.raw).to eq(
-        "This is a **GMAIL** reply ;)\n\n<details class='elided'>\n<summary title='Show trimmed content'>&#183;&#183;&#183;</summary>\n\nThis is the *elided* part!\n\n</details>",
-      )
+      expect(topic.posts.last.raw).to eq <<~MD.strip
+        This is a **GMAIL** reply ;)
+
+        <details class='elided'>
+        <summary title='Show trimmed content'>&#183;&#183;&#183;</summary>
+
+        This is the *elided* part!
+
+        </details>
+      MD
+    end
+
+    it "correctly extracts body from exchange emails" do
+      SiteSetting.always_show_trimmed_content = true
+      expect { process(:exchange_html_body) }.to change { topic.posts.count }
+      expect(topic.posts.last.raw).to eq("This is the **body** of the email.")
+    end
+
+    it "correctly extracts reply from exchange emails" do
+      SiteSetting.always_show_trimmed_content = true
+      expect { process(:exchange_html_reply) }.to change { topic.posts.count }
+      expect(topic.posts.last.raw).to eq("This is the **body !!** of the email.")
+    end
+
+    it "correctly extracts body & reply from exchange emails" do
+      SiteSetting.always_show_trimmed_content = true
+      expect { process(:exchange_html_body_and_reply) }.to change { topic.posts.count }
+      expect(topic.posts.last.raw).to eq <<~MD.strip
+        This is the **body** of the email.
+
+        <details class='elided'>
+        <summary title='Show trimmed content'>&#183;&#183;&#183;</summary>
+
+        This is the *reply*!
+
+        </details>
+      MD
     end
 
     it "doesn't process email with same message-id more than once" do
@@ -666,18 +699,14 @@ RSpec.describe Email::Receiver do
       post = topic.posts.last
       upload = post.uploads.first
 
-      expect(post.raw).to include(
-        "![#{upload.original_filename}|#{upload.width}x#{upload.height}](#{upload.short_url})",
-      )
+      expect(post.raw).to include UploadMarkdown.new(upload).to_markdown
 
       expect { process(:inline_image) }.to change { topic.posts.count }
 
       post = topic.posts.last
       upload = post.uploads.first
 
-      expect(post.raw).to include(
-        "![#{upload.original_filename}|#{upload.width}x#{upload.height}](#{upload.short_url})",
-      )
+      expect(post.raw).to include UploadMarkdown.new(upload).to_markdown
     end
 
     it "supports attached images in HTML part" do
@@ -706,7 +735,11 @@ RSpec.describe Email::Receiver do
       expect(post.raw).to eq(<<~MD.chomp)
       [image:#{"0" * 5000}
 
-      ![#{upload.original_filename}|#{upload.width}x#{upload.height}](#{upload.short_url})
+      [details="#{I18n.t("emails.incoming.attachments")}"]
+
+      #{UploadMarkdown.new(upload).to_markdown}
+
+      [/details]
       MD
     end
 
@@ -725,7 +758,7 @@ RSpec.describe Email::Receiver do
       <details class='elided'>
       <summary title='Show trimmed content'>&#183;&#183;&#183;</summary>
 
-      <img src="upload://qUm0DGR49PAZshIi7HxMd3cAlzn.png" width="300" height="200">
+      <img src="#{upload.short_url}" width="300" height="200">
 
       </details>
       MD
@@ -740,7 +773,11 @@ RSpec.describe Email::Receiver do
       expect(post.raw).to eq(<<~MD.chomp)
       Please find some text file attached.
 
-      [#{upload.original_filename}|attachment](#{upload.short_url}) (20 Bytes)
+      [details="#{I18n.t("emails.incoming.attachments")}"]
+
+      #{UploadMarkdown.new(upload).to_markdown}
+
+      [/details]
       MD
 
       expect { process(:apple_mail_attachment) }.to change { topic.posts.count }
@@ -756,12 +793,23 @@ RSpec.describe Email::Receiver do
       MD
     end
 
+    it "tries not to repeat duplicate attachments" do
+      SiteSetting.authorized_extensions = "jpg"
+      SiteSetting.always_show_trimmed_content = true
+
+      expect { process(:logo_1) }.to change { Upload.count }.by(1)
+      logo = Upload.last
+      expect(topic.posts.last.raw).to include logo.short_url
+
+      expect { process(:logo_2) }.not_to change { Upload.count }
+      expect(topic.posts.last.raw).to include logo.short_url
+    end
+
     it "works with removed attachments" do
       SiteSetting.authorized_extensions = "jpg"
 
       expect { process(:removed_attachments) }.to change { topic.posts.count }
-      post = topic.posts.last
-      expect(post.uploads).to be_empty
+      expect(topic.posts.last.uploads).to be_empty
     end
 
     it "supports eml attachments" do
@@ -773,7 +821,11 @@ RSpec.describe Email::Receiver do
       expect(post.raw).to eq(<<~MD.chomp)
       Please find the eml file attached.
 
-      [#{upload.original_filename}|attachment](#{upload.short_url}) (193 Bytes)
+      [details="#{I18n.t("emails.incoming.attachments")}"]
+
+      #{UploadMarkdown.new(upload).to_markdown}
+
+      [/details]
       MD
     end
 
@@ -814,9 +866,7 @@ RSpec.describe Email::Receiver do
       post = topic.posts.last
       upload = post.uploads.last
 
-      expect(post.raw).to include(
-        "[#{upload.original_filename}|attachment](#{upload.short_url}) (64 KB)",
-      )
+      expect(post.raw).to include UploadMarkdown.new(upload).to_markdown
     end
 
     it "supports liking via email" do
@@ -919,7 +969,7 @@ RSpec.describe Email::Receiver do
 
       user = topic.user
       expect(user.staged).to eq(true)
-      expect(user.username).to eq("random.name")
+      expect(user.username).to eq("user1")
       expect(user.name).to eq("Случайная Имя")
     end
 
@@ -997,20 +1047,16 @@ RSpec.describe Email::Receiver do
 
       it "extracts address and uses it for comparison" do
         expect { process(:reply_to_whitespaces) }.to change(Topic, :count).by(1)
-        user = User.last
         incoming = IncomingEmail.find_by(message_id: "TXULO4v6YU0TzeL2buFAJNU2MK21c7t4@example.com")
-        topic = incoming.topic
         expect(incoming.from_address).to eq("johndoe@example.com")
-        expect(user.email).to eq("johndoe@example.com")
+        expect(User.last.email).to eq("johndoe@example.com")
       end
 
       it "handles emails where there is a Reply-To address, using that instead of the from address, if X-Original-From is present" do
         expect { process(:reply_to_different_to_from) }.to change(Topic, :count).by(1)
-        user = User.last
         incoming = IncomingEmail.find_by(message_id: "3848c3m98r439c348mc349@test.mailinglist.com")
-        topic = incoming.topic
         expect(incoming.from_address).to eq("arthurmorgan@reddeadtest.com")
-        expect(user.email).to eq("arthurmorgan@reddeadtest.com")
+        expect(User.last.email).to eq("arthurmorgan@reddeadtest.com")
       end
 
       it "allows for quotes around the display name of the Reply-To address" do
@@ -1018,20 +1064,16 @@ RSpec.describe Email::Receiver do
           Topic,
           :count,
         ).by(1)
-        user = User.last
         incoming = IncomingEmail.find_by(message_id: "3848c3m98r439c348mc349@test.mailinglist.com")
-        topic = incoming.topic
         expect(incoming.from_address).to eq("johnmarston@reddeadtest.com")
-        expect(user.email).to eq("johnmarston@reddeadtest.com")
+        expect(User.last.email).to eq("johnmarston@reddeadtest.com")
       end
 
       it "does not use the reply-to address if an X-Original-From header is not present" do
         expect { process(:reply_to_different_to_from_no_x_original) }.to change(Topic, :count).by(1)
-        user = User.last
         incoming = IncomingEmail.find_by(message_id: "3848c3m98r439c348mc349@test.mailinglist.com")
-        topic = incoming.topic
         expect(incoming.from_address).to eq("westernsupport@test.mailinglist.com")
-        expect(user.email).to eq("westernsupport@test.mailinglist.com")
+        expect(User.last.email).to eq("westernsupport@test.mailinglist.com")
       end
 
       it "does not use the reply-to address if the X-Original-From header is different from the reply-to address" do
@@ -1039,11 +1081,9 @@ RSpec.describe Email::Receiver do
           Topic,
           :count,
         ).by(1)
-        user = User.last
         incoming = IncomingEmail.find_by(message_id: "3848c3m98r439c348mc349@test.mailinglist.com")
-        topic = incoming.topic
         expect(incoming.from_address).to eq("westernsupport@test.mailinglist.com")
-        expect(user.email).to eq("westernsupport@test.mailinglist.com")
+        expect(User.last.email).to eq("westernsupport@test.mailinglist.com")
       end
     end
 
@@ -1052,10 +1092,12 @@ RSpec.describe Email::Receiver do
 
       it "associates email replies using both 'In-Reply-To' and 'References' headers" do
         expect { process(:email_reply_1) }.to change(Topic, :count).by(1) &
-          change(Post, :count).by(3)
+          change(Post, :count).by(3) & change(User, :count).by(3)
 
         topic = Topic.last
+        users = User.last(3)
         ordered_posts = topic.ordered_posts
+        expect(ordered_posts.size).to eq(3)
 
         expect(ordered_posts.first.raw).to eq("This is email reply **1**.")
 
@@ -1063,7 +1105,7 @@ RSpec.describe Email::Receiver do
           expect(post.action_code).to eq("invited_user")
           expect(post.user.email).to eq("one@foo.com")
 
-          expect(%w[two three].include?(post.custom_fields["action_code_who"])).to eq(true)
+          expect(users.map(&:username)).to include(post.custom_fields["action_code_who"])
         end
 
         expect { process(:email_reply_2) }.to change { topic.posts.count }.by(1)
@@ -1097,44 +1139,6 @@ RSpec.describe Email::Receiver do
           Email::Receiver.new(mail_string).process!
         end
 
-        it "posts a reply using a message-id in the format topic/TOPIC_ID/POST_ID@HOST" do
-          expect {
-            process_mail_with_message_id("topic/#{topic.id}/#{post.id}@test.localhost")
-          }.to change { Post.count }.by(1)
-          expect(topic.reload.posts.last.raw).to include(
-            "This is email reply testing with Message-ID formats",
-          )
-        end
-
-        it "posts a reply using a message-id in the format topic/TOPIC_ID@HOST" do
-          expect { process_mail_with_message_id("topic/#{topic.id}@test.localhost") }.to change {
-            Post.count
-          }.by(1)
-          expect(topic.reload.posts.last.raw).to include(
-            "This is email reply testing with Message-ID formats",
-          )
-        end
-
-        it "posts a reply using a message-id in the format topic/TOPIC_ID/POST_ID.RANDOM_SUFFIX@HOST" do
-          expect {
-            process_mail_with_message_id("topic/#{topic.id}/#{post.id}.rjc3yr79834y@test.localhost")
-          }.to change { Post.count }.by(1)
-          expect(topic.reload.posts.last.raw).to include(
-            "This is email reply testing with Message-ID formats",
-          )
-        end
-
-        it "posts a reply using a message-id in the format topic/TOPIC_ID.RANDOM_SUFFIX@HOST" do
-          expect {
-            process_mail_with_message_id(
-              "topic/#{topic.id}/#{post.id}.x3487nxy877843x@test.localhost",
-            )
-          }.to change { Post.count }.by(1)
-          expect(topic.reload.posts.last.raw).to include(
-            "This is email reply testing with Message-ID formats",
-          )
-        end
-
         it "posts a reply using a message-id in the format discourse/post/POST_ID@HOST" do
           expect {
             process_mail_with_message_id("discourse/post/#{post.id}@test.localhost")
@@ -1153,9 +1157,7 @@ RSpec.describe Email::Receiver do
       post = Topic.last.first_post
       upload = post.uploads.first
 
-      expect(post.raw).to include(
-        "[#{upload.original_filename}|attachment](#{upload.short_url}) (#{upload.filesize} Bytes)",
-      )
+      expect(post.raw).to include UploadMarkdown.new(upload).to_markdown
     end
 
     it "reenables user's PM email notifications when user emails new topic to group" do
@@ -1257,7 +1259,7 @@ RSpec.describe Email::Receiver do
           incoming_email: "team@somesmtpaddress.com|support+team@bar.com",
           smtp_server: "smtp.test.com",
           smtp_port: 587,
-          smtp_ssl: true,
+          smtp_ssl_mode: Group.smtp_ssl_modes[:starttls],
           smtp_enabled: true,
         )
       end
@@ -1352,7 +1354,7 @@ RSpec.describe Email::Receiver do
           incoming_email: "team@somesmtpaddress.com|suppor+team@bar.com",
           smtp_server: "smtp.test.com",
           smtp_port: 587,
-          smtp_ssl: true,
+          smtp_ssl_mode: Group.smtp_ssl_modes[:starttls],
           smtp_enabled: true,
         )
         process(:email_to_group_email_username_1)
@@ -1400,13 +1402,29 @@ RSpec.describe Email::Receiver do
         expect(IncomingEmail.exists?(post_id: group_post.id)).to eq(false)
       end
 
-      it "processes a reply from the OP user to the group SMTP username, linking the reply_to_post_number correctly by
-      matching in_reply_to to the email log" do
+      it "processes a reply from the OP user to the group SMTP username, linking the reply_to_post_number correctly by matching in_reply_to to the email log" do
         email_log, group_post = reply_as_group_user
 
         reply_email = email(:email_to_group_email_username_2)
         reply_email.gsub!("MESSAGE_ID_REPLY_TO", email_log.message_id)
-        expect do Email::Receiver.new(reply_email).process! end.to not_change {
+        expect { Email::Receiver.new(reply_email).process! }.to not_change {
+          Topic.count
+        }.and change { Post.count }.by(1)
+
+        reply_post = Post.last
+        expect(reply_post.reply_to_user).to eq(user_in_group)
+        expect(reply_post.reply_to_post_number).to eq(group_post.post_number)
+      end
+
+      it "handles multiple message IDs in the in_reply_to header by only using the first one" do
+        email_log, group_post = reply_as_group_user
+
+        reply_email = email(:email_to_group_email_username_3)
+        reply_email.gsub!(
+          "MESSAGE_ID_REPLY_TO",
+          "<#{email_log.message_id}> <test/message/id@discourse.com>",
+        )
+        expect { Email::Receiver.new(reply_email).process! }.to not_change {
           Topic.count
         }.and change { Post.count }.by(1)
 
@@ -1416,11 +1434,11 @@ RSpec.describe Email::Receiver do
       end
 
       it "processes the reply from the user as a brand new topic if they have replied from a different address (e.g. auto forward) and allow_unknown_sender_topic_replies is disabled" do
-        email_log, group_post = reply_as_group_user
+        email_log, _group_post = reply_as_group_user
 
         reply_email = email(:email_to_group_email_username_2_as_unknown_sender)
         reply_email.gsub!("MESSAGE_ID_REPLY_TO", email_log.message_id)
-        expect do Email::Receiver.new(reply_email).process! end.to change { Topic.count }.by(
+        expect { Email::Receiver.new(reply_email).process! }.to change { Topic.count }.by(
           1,
         ).and change { Post.count }.by(1)
 
@@ -1430,11 +1448,11 @@ RSpec.describe Email::Receiver do
 
       it "processes the reply from the user as a reply if they have replied from a different address (e.g. auto forward) and allow_unknown_sender_topic_replies is enabled" do
         group.update!(allow_unknown_sender_topic_replies: true)
-        email_log, group_post = reply_as_group_user
+        email_log, _group_post = reply_as_group_user
 
         reply_email = email(:email_to_group_email_username_2_as_unknown_sender)
         reply_email.gsub!("MESSAGE_ID_REPLY_TO", email_log.message_id)
-        expect do Email::Receiver.new(reply_email).process! end.to not_change {
+        expect { Email::Receiver.new(reply_email).process! }.to not_change {
           Topic.count
         }.and change { Post.count }.by(1)
 
@@ -1451,7 +1469,7 @@ RSpec.describe Email::Receiver do
 
         reply_email = email(:email_to_group_email_username_2)
         reply_email.gsub!("MESSAGE_ID_REPLY_TO", email_log.message_id)
-        expect do Email::Receiver.new(reply_email).process! end.to change { Topic.count }.by(
+        expect { Email::Receiver.new(reply_email).process! }.to change { Topic.count }.by(
           1,
         ).and change { Post.count }.by(1)
 
@@ -1769,23 +1787,49 @@ RSpec.describe Email::Receiver do
     end
   end
 
-  describe "check_address" do
-    before { SiteSetting.reply_by_email_address = "foo+%{reply_key}@bar.com" }
+  describe "#check_address" do
+    context "when e-mail is associated with a reply key" do
+      before { SiteSetting.reply_by_email_address = "foo+%{reply_key}@bar.com" }
 
-    it "returns nil when the key is invalid" do
-      expect(Email::Receiver.check_address("fake@fake.com")).to be_nil
-      expect(
-        Email::Receiver.check_address("foo+4f97315cc828096c9cb34c6f1a0d6fe8@bar.com"),
-      ).to be_nil
+      it "returns nil when the key is invalid" do
+        expect(Email::Receiver.check_address("fake@fake.com")).to be_nil
+        expect(
+          Email::Receiver.check_address("foo+4f97315cc828096c9cb34c6f1a0d6fe8@bar.com"),
+        ).to be_nil
+      end
+
+      context "with a valid reply" do
+        it "returns the destination when the key is valid" do
+          post_reply_key = Fabricate(:post_reply_key, reply_key: "4f97315cc828096c9cb34c6f1a0d6fe8")
+
+          dest = Email::Receiver.check_address("foo+4f97315cc828096c9cb34c6f1a0d6fe8@bar.com")
+
+          expect(dest).to eq(post_reply_key)
+        end
+      end
     end
 
-    context "with a valid reply" do
-      it "returns the destination when the key is valid" do
-        post_reply_key = Fabricate(:post_reply_key, reply_key: "4f97315cc828096c9cb34c6f1a0d6fe8")
+    context "when address is associated with a category" do
+      fab!(:category) { Fabricate(:category, email_in: "category@bar.com") }
 
-        dest = Email::Receiver.check_address("foo+4f97315cc828096c9cb34c6f1a0d6fe8@bar.com")
+      context "when replying by email is enabled" do
+        it "returns the destination category" do
+          SiteSetting.reply_by_email_enabled = true
 
-        expect(dest).to eq(post_reply_key)
+          dest = described_class.check_address("category@bar.com")
+
+          expect(dest).to eq(category)
+        end
+      end
+
+      context "when replying by email is disabled" do
+        it "returns nil" do
+          SiteSetting.reply_by_email_enabled = false
+
+          dest = described_class.check_address("category@bar.com")
+
+          expect(dest).to be_nil
+        end
       end
     end
   end
@@ -2024,7 +2068,7 @@ RSpec.describe Email::Receiver do
   end
 
   describe "mailman mirror" do
-    fab!(:category) { Fabricate(:mailinglist_mirror_category) }
+    fab!(:category, :mailinglist_mirror_category)
 
     it "uses 'from' email address" do
       expect { process(:mailman_1) }.to change { Topic.count }
@@ -2056,7 +2100,7 @@ RSpec.describe Email::Receiver do
   end
 
   describe "mailing list mirror" do
-    fab!(:category) { Fabricate(:mailinglist_mirror_category) }
+    fab!(:category, :mailinglist_mirror_category)
 
     before { SiteSetting.block_auto_generated_emails = true }
 
@@ -2231,7 +2275,7 @@ RSpec.describe Email::Receiver do
       SiteSetting.strip_incoming_email_lines = true
 
       receiver = Email::Receiver.new(email)
-      text, elided, format = receiver.select_body
+      text, _elided, _format = receiver.select_body
       expect(text).to eq(stripped_text)
     end
 
@@ -2253,6 +2297,41 @@ RSpec.describe Email::Receiver do
       receiver = Email::Receiver.new(email)
       text, _elided, _format = receiver.select_body
       expect(text).to be_blank
+    end
+
+    it "strip unsubscribe links" do
+      keep_relative = "/email/unsubscribe/#{SecureRandom.hex(32)}"
+      keep_other_instance = "http://other.discourse.org/email/unsubscribe/#{SecureRandom.hex(32)}"
+      strip_in_text = "#{Discourse.base_url}/email/unsubscribe/#{SecureRandom.hex(32)}"
+      strip_in_elided = "#{Discourse.base_url}/email/unsubscribe/#{SecureRandom.hex(32)}"
+
+      email = <<~EMAIL
+        Date: Fri, 10 Jan 2024 13:25:42 +0100
+        Subject: Will this be stripped?
+        From: Foo <foo@discourse.org>
+        To: bar@discourse.org
+        Content-Type: text/plain; charset="UTF-8"
+
+        This is a line that will not be touched.
+
+        This is a [relative](#{keep_relative}) link.
+
+        This one is from <a href="#{keep_other_instance}">another instance</a>
+
+        Here's my unsubscribe link: #{strip_in_text}
+
+        XoXo
+
+        ---
+
+        To unsubscribe from these emails, [click here](#{strip_in_elided}).
+      EMAIL
+
+      text, elided, _ = Email::Receiver.new(email).select_body
+
+      expect(text).to_not include(strip_in_text)
+      expect(text).to include(keep_relative, keep_other_instance)
+      expect(elided).to_not include(strip_in_elided)
     end
   end
 

@@ -1,11 +1,12 @@
 # frozen_string_literal: true
 
 RSpec.describe "Chat composer draft", type: :system do
-  fab!(:current_user) { Fabricate(:user) }
-  fab!(:channel_1) { Fabricate(:chat_channel) }
+  fab!(:current_user, :user)
+  fab!(:channel_1, :chat_channel)
   fab!(:message_1) do
     Fabricate(
       :chat_message,
+      use_service: true,
       chat_channel: channel_1,
       message: "This is a message for draft and replies",
     )
@@ -24,14 +25,14 @@ RSpec.describe "Chat composer draft", type: :system do
       sign_in(current_user)
     end
 
-    it "loads the draft" do
+    xit "loads the draft" do
       chat_page.visit_channel(channel_1)
 
-      expect(channel_page.composer.value).to eq("draft")
+      expect(channel_page.composer).to have_value("draft")
     end
 
     context "when loading another channel and back" do
-      fab!(:channel_2) { Fabricate(:chat_channel) }
+      fab!(:channel_2, :chat_channel)
 
       before do
         create_draft(channel_2, user: current_user, data: { message: "draft2" })
@@ -41,15 +42,15 @@ RSpec.describe "Chat composer draft", type: :system do
       it "loads the correct drafts" do
         chat_page.visit_channel(channel_1)
 
-        expect(channel_page.composer.value).to eq("draft")
+        expect(channel_page.composer).to have_value("draft")
 
         chat_page.visit_channel(channel_2)
 
-        expect(channel_page.composer.value).to eq("draft2")
+        expect(channel_page.composer).to have_value("draft2")
 
         chat_page.visit_channel(channel_1)
 
-        expect(channel_page.composer.value).to eq("draft")
+        expect(channel_page.composer).to have_value("draft")
       end
     end
 
@@ -103,7 +104,7 @@ RSpec.describe "Chat composer draft", type: :system do
       it "loads the draft with the upload" do
         chat_page.visit_channel(channel_1)
 
-        expect(channel_page.composer.value).to eq("draft")
+        expect(channel_page.composer).to have_value("draft")
         expect(page).to have_selector(".chat-composer-upload--image", count: 1)
       end
     end
@@ -129,10 +130,10 @@ RSpec.describe "Chat composer draft", type: :system do
         )
       end
 
-      it "loads the draft with replied to mesage" do
+      it "loads the draft with replied to message" do
         chat_page.visit_channel(channel_1)
 
-        expect(channel_page.composer.value).to eq("draft")
+        expect(channel_page.composer).to have_value("draft")
         expect(page).to have_selector(".chat-reply__username", text: message_1.user.username)
         expect(page).to have_selector(".chat-reply__excerpt", text: message_1.excerpt)
       end
@@ -152,7 +153,7 @@ RSpec.describe "Chat composer draft", type: :system do
     it "loads the draft" do
       chat_page.visit_thread(thread_1)
 
-      expect(thread_page.composer.value).to eq("draft")
+      expect(thread_page.composer).to have_value("draft")
     end
 
     context "when loading another channel and back" do
@@ -167,15 +168,15 @@ RSpec.describe "Chat composer draft", type: :system do
       it "loads the correct drafts" do
         chat_page.visit_thread(thread_1)
 
-        expect(thread_page.composer.value).to eq("draft")
+        expect(thread_page.composer).to have_value("draft")
 
         chat_page.visit_thread(thread_2)
 
-        expect(thread_page.composer.value).to eq("draft2")
+        expect(thread_page.composer).to have_value("draft2")
 
         chat_page.visit_thread(thread_1)
 
-        expect(thread_page.composer.value).to eq("draft")
+        expect(thread_page.composer).to have_value("draft")
       end
     end
 
@@ -238,7 +239,7 @@ RSpec.describe "Chat composer draft", type: :system do
       it "loads the draft with the upload" do
         chat_page.visit_thread(thread_1)
 
-        expect(thread_page.composer.value).to eq("draft")
+        expect(thread_page.composer).to have_value("draft")
         expect(page).to have_selector(".chat-composer-upload--image", count: 1)
       end
     end

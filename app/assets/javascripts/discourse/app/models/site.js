@@ -1,19 +1,26 @@
-import EmberObject, { get } from "@ember/object";
+import { tracked } from "@glimmer/tracking";
+import EmberObject, { computed, get } from "@ember/object";
+import { dependentKeyCompat } from "@ember/object/compat";
 import { alias, sort } from "@ember/object/computed";
+import { service } from "@ember/service";
 import { htmlSafe } from "@ember/template";
 import { isEmpty } from "@ember/utils";
+import discourseComputed from "discourse/lib/decorators";
+import deprecated from "discourse/lib/deprecated";
+import { isRailsTesting, isTesting } from "discourse/lib/environment";
+import { getOwnerWithFallback } from "discourse/lib/get-owner";
+import Mobile from "discourse/lib/mobile";
 import PreloadStore from "discourse/lib/preload-store";
-import Singleton from "discourse/mixins/singleton";
+import singleton from "discourse/lib/singleton";
 import Archetype from "discourse/models/archetype";
 import Category from "discourse/models/category";
 import PostActionType from "discourse/models/post-action-type";
 import RestModel from "discourse/models/rest";
 import TrustLevel from "discourse/models/trust-level";
-import deprecated from "discourse-common/lib/deprecated";
-import { getOwnerWithFallback } from "discourse-common/lib/get-owner";
-import discourseComputed from "discourse-common/utils/decorators";
+import { havePostStreamWidgetExtensions } from "discourse/widgets/post-stream";
 
-export default class Site extends RestModel.extend().reopenClass(Singleton) {
+@singleton
+export default class Site extends RestModel {
   static createCurrent() {
     const store = getOwnerWithFallback(this).lookup("service:store");
     const siteAttributes = PreloadStore.get("site");
@@ -24,39 +31,10 @@ export default class Site extends RestModel.extend().reopenClass(Singleton) {
 
   static create() {
     const result = super.create.apply(this, arguments);
-    const store = result.store;
 
     if (result.categories) {
-      let subcatMap = {};
-
-      result.categoriesById = new Map();
       result.categories = result.categories.map((c) => {
-        if (c.parent_category_id) {
-          subcatMap[c.parent_category_id] =
-            subcatMap[c.parent_category_id] || [];
-          subcatMap[c.parent_category_id].push(c.id);
-        }
-        return (result.categoriesById[c.id] = store.createRecord(
-          "category",
-          c
-        ));
-      });
-
-      // Associate the categories with their parents
-      result.categories.forEach((c) => {
-        let subcategoryIds = subcatMap[c.get("id")];
-        if (subcategoryIds) {
-          c.set(
-            "subcategories",
-            subcategoryIds.map((id) => result.categoriesById[id])
-          );
-        }
-        if (c.get("parent_category_id")) {
-          c.set(
-            "parentCategory",
-            result.categoriesById[c.get("parent_category_id")]
-          );
-        }
+        return result.store.createRecord("category", c);
       });
     }
 
@@ -103,14 +81,125 @@ export default class Site extends RestModel.extend().reopenClass(Singleton) {
     return result;
   }
 
+  @service siteSettings;
+  @service currentUser;
+  @service capabilities;
+
+  @tracked categories;
+
   @alias("is_readonly") isReadOnly;
 
   @sort("categories", "topicCountDesc") categoriesByCount;
+
+  #glimmerPostStreamEnabled;
+
   init() {
     super.init(...arguments);
 
     this.topicCountDesc = ["topic_count:desc"];
     this.categories = this.categories || [];
+  }
+
+  @dependentKeyCompat
+  get desktopView() {
+    return !this.mobileView;
+  }
+
+  @dependentKeyCompat
+  get mobileView() {
+    if (this.siteSettings.viewport_based_mobile_mode) {
+      return !this.capabilities.viewport.sm;
+    } else {
+      return Mobile.mobileView;
+    }
+  }
+
+  @dependentKeyCompat
+  get isMobileDevice() {
+    return this.mobileView;
+  }
+
+  get useGlimmerPostStream() {
+    if (this.#glimmerPostStreamEnabled !== undefined) {
+      // Use cached value after the first call to prevent duplicate messages in the console
+      return this.#glimmerPostStreamEnabled;
+    }
+
+    let enabled;
+
+    /* eslint-disable no-console */
+    let settingValue = this.siteSettings.deactivate_widgets_rendering
+      ? "enabled" // if widgets rendering is deactivated, we always use the glimmer post stream
+      : this.siteSettings.glimmer_post_stream_mode;
+    if (
+      settingValue === "disabled" &&
+      this.currentUser?.use_glimmer_post_stream_mode_auto_mode
+    ) {
+      settingValue = "auto";
+    }
+
+    if (settingValue === "disabled") {
+      enabled = false;
+    } else {
+      if (settingValue === "enabled") {
+        if (havePostStreamWidgetExtensions) {
+          console.log(
+            [
+              "⚠️  Using the new 'glimmer' post stream, even though some themes/plugins are not ready.\n" +
+                "The following plugins and/or themes are using deprecated APIs and may have broken customizations: \n",
+              ...Array.from(havePostStreamWidgetExtensions).sort(),
+            ].join("\n- ")
+          );
+        } else {
+          if (!isTesting() && !isRailsTesting()) {
+            console.log("✅  Using the new 'glimmer' post stream!");
+          }
+        }
+
+        enabled = true;
+      } else {
+        // auto
+        if (havePostStreamWidgetExtensions) {
+          console.warn(
+            [
+              "⚠️  Detected themes/plugins which are incompatible with the new 'glimmer' post stream. Falling back to the old implementation.\n" +
+                "The following plugins and/or themes are using deprecated APIs: \n",
+              ...Array.from(havePostStreamWidgetExtensions).sort(),
+            ].join("\n- ")
+          );
+          enabled = false;
+        } else {
+          if (!isTesting() && !isRailsTesting()) {
+            console.log("✅  Using the new 'glimmer' post stream!");
+          }
+
+          enabled = true;
+        }
+      }
+    }
+    /* eslint-enable no-console */
+
+    this.#glimmerPostStreamEnabled = enabled;
+
+    return enabled;
+  }
+
+  @computed("categories.[]")
+  get categoriesById() {
+    const map = new Map();
+    this.categories.forEach((c) => map.set(c.id, c));
+    return map;
+  }
+
+  @computed("categories.@each.parent_category_id")
+  get categoriesByParentId() {
+    const map = new Map();
+    for (const category of this.categories) {
+      const siblings = map.get(category.parent_category_id) || [];
+      siblings.push(category);
+      map.set(category.parent_category_id, siblings);
+    }
+    return map;
   }
 
   @discourseComputed("notification_types")
@@ -191,7 +280,6 @@ export default class Site extends RestModel.extend().reopenClass(Singleton) {
     const existingCategory = categories.findBy("id", id);
     if (existingCategory) {
       categories.removeObject(existingCategory);
-      delete this.categoriesById.categoryId;
     }
   }
 
@@ -212,21 +300,6 @@ export default class Site extends RestModel.extend().reopenClass(Singleton) {
       // TODO insert in right order?
       newCategory = this.store.createRecord("category", newCategory);
       categories.pushObject(newCategory);
-      this.categoriesById[categoryId] = newCategory;
-      newCategory.set(
-        "parentCategory",
-        this.categoriesById[newCategory.parent_category_id]
-      );
-      newCategory.set(
-        "subcategories",
-        this.categories.filterBy("parent_category_id", categoryId)
-      );
-      if (newCategory.parentCategory) {
-        if (!newCategory.parentCategory.subcategories) {
-          newCategory.parentCategory.set("subcategories", []);
-        }
-        newCategory.parentCategory.subcategories.pushObject(newCategory);
-      }
       return newCategory;
     }
   }

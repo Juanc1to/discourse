@@ -1,8 +1,12 @@
 # frozen_string_literal: true
 
 class Chat::Api::ChannelThreadMessagesController < Chat::ApiController
+  MAX_PAGE_SIZE = 50
+
   def index
-    with_service(::Chat::ListChannelThreadMessages) do
+    ::Chat::ListChannelThreadMessages.call(
+      service_params.deep_merge(params: { page_size: MAX_PAGE_SIZE }),
+    ) do |result|
       on_success do
         render_serialized(
           result,
@@ -12,11 +16,13 @@ class Chat::Api::ChannelThreadMessagesController < Chat::ApiController
           include_thread_original_message: false,
         )
       end
-
-      on_failed_policy(:ensure_thread_enabled) { raise Discourse::NotFound }
+      on_failure { render(json: failed_json, status: 422) }
       on_failed_policy(:target_message_exists) { raise Discourse::NotFound }
       on_failed_policy(:can_view_thread) { raise Discourse::InvalidAccess }
       on_model_not_found(:thread) { raise Discourse::NotFound }
+      on_failed_contract do |contract|
+        render(json: failed_json.merge(errors: contract.errors.full_messages), status: 400)
+      end
     end
   end
 end

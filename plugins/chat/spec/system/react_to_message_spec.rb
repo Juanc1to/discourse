@@ -3,7 +3,7 @@
 RSpec.describe "React to message", type: :system do
   fab!(:current_user) { Fabricate(:user, group_ids: [Group::AUTO_GROUPS[:trust_level_1]]) }
   fab!(:other_user) { Fabricate(:user, group_ids: [Group::AUTO_GROUPS[:trust_level_1]]) }
-  fab!(:category_channel_1) { Fabricate(:category_channel) }
+  fab!(:category_channel_1, :category_channel)
   fab!(:message_1) { Fabricate(:chat_message, chat_channel: category_channel_1) }
 
   let(:chat) { PageObjects::Pages::Chat.new }
@@ -20,7 +20,7 @@ RSpec.describe "React to message", type: :system do
       Chat::MessageReactor.new(other_user, category_channel_1).react!(
         message_id: message_1.id,
         react_action: :add,
-        emoji: "female_detective",
+        emoji: "woman_detective",
       )
     end
 
@@ -53,7 +53,7 @@ RSpec.describe "React to message", type: :system do
       Chat::MessageReactor.new(other_user, category_channel_1).react!(
         message_id: message_1.id,
         react_action: :add,
-        emoji: "female_detective",
+        emoji: "woman_detective",
       )
     end
 
@@ -62,9 +62,8 @@ RSpec.describe "React to message", type: :system do
         it "adds a reaction" do
           sign_in(current_user)
           chat.visit_channel(category_channel_1)
-          channel.hover_message(message_1)
-          find(".chat-message-react-btn").click
-          find(".chat-emoji-picker [data-emoji=\"grimacing\"]").click
+          channel.react_to_message(message_1)
+          find(".emoji-picker [data-emoji=\"grimacing\"]").click
 
           expect(channel).to have_reaction(message_1, "grimacing")
         end
@@ -83,8 +82,8 @@ RSpec.describe "React to message", type: :system do
 
             using_session(:tab_1) do
               channel.hover_message(message_1)
-              find(".chat-message-react-btn").click
-              find(".chat-emoji-picker [data-emoji=\"#{reaction}\"]").click
+              find(".react-btn").click
+              find(".emoji-picker [data-emoji=\"#{reaction}\"]").click
 
               expect(channel).to have_reaction(message_1, reaction)
             end
@@ -101,7 +100,7 @@ RSpec.describe "React to message", type: :system do
             chat.visit_channel(category_channel_1)
             channel.hover_message(message_1)
             find(".chat-message-actions .react-btn").click
-            find(".chat-emoji-picker [data-emoji=\"nerd_face\"]").click
+            find(".emoji-picker [data-emoji=\"nerd_face\"]").click
 
             expect(channel).to have_reaction(message_1, reaction_1.emoji)
           end
@@ -114,12 +113,12 @@ RSpec.describe "React to message", type: :system do
             channel.hover_message(message_1)
             find(".chat-message-actions .react-btn").click
 
-            expect(page).to have_no_css(".chat-emoji-picker [data-emoji=\"fu\"]")
-            expect(page).to have_no_css(".chat-emoji-picker [data-emoji=\"middle_finger\"]")
+            expect(page).to have_no_css(".emoji-picker [data-emoji=\"fu\"]")
+            expect(page).to have_no_css(".emoji-picker [data-emoji=\"middle_finger\"]")
           end
         end
 
-        context "when using frequent reactions" do
+        context "when using favorite reactions" do
           it "adds a reaction" do
             sign_in(current_user)
             chat.visit_channel(category_channel_1)
@@ -133,6 +132,18 @@ RSpec.describe "React to message", type: :system do
         end
       end
     end
+
+    context "when mobile", mobile: true do
+      context "when using favorite reactions" do
+        it "adds a reaction" do
+          sign_in(current_user)
+          chat.visit_channel(category_channel_1)
+          channel.emoji(message_1, "+1")
+
+          expect(channel.message_reactions_list(message_1)).to have_css("[data-emoji-name=\"+1\"]")
+        end
+      end
+    end
   end
 
   context "when current user and another have reacted" do
@@ -142,7 +153,7 @@ RSpec.describe "React to message", type: :system do
       Chat::MessageReactor.new(current_user, category_channel_1).react!(
         message_id: message_1.id,
         react_action: :add,
-        emoji: "female_detective",
+        emoji: "woman_detective",
       )
     end
 
@@ -150,7 +161,7 @@ RSpec.describe "React to message", type: :system do
       Chat::MessageReactor.new(other_user, category_channel_1).react!(
         message_id: message_1.id,
         react_action: :add,
-        emoji: "female_detective",
+        emoji: "woman_detective",
       )
     end
 
@@ -159,11 +170,11 @@ RSpec.describe "React to message", type: :system do
         sign_in(current_user)
         chat.visit_channel(category_channel_1)
 
-        expect(channel).to have_reaction(message_1, "female_detective", "2")
+        expect(channel).to have_reaction(message_1, "woman_detective", "2")
 
-        channel.click_reaction(message_1, "female_detective")
+        channel.click_reaction(message_1, "woman_detective")
 
-        expect(channel).to have_reaction(message_1, "female_detective", "1")
+        expect(channel).to have_reaction(message_1, "woman_detective", "1")
       end
     end
   end
@@ -173,7 +184,7 @@ RSpec.describe "React to message", type: :system do
       Chat::MessageReactor.new(current_user, category_channel_1).react!(
         message_id: message_1.id,
         react_action: :add,
-        emoji: "female_detective",
+        emoji: "woman_detective",
       )
     end
 

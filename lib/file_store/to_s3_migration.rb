@@ -6,8 +6,8 @@ module FileStore
   ToS3MigrationError = Class.new(RuntimeError)
 
   class ToS3Migration
-    MISSING_UPLOADS_RAKE_TASK_NAME ||= "posts:missing_uploads"
-    UPLOAD_CONCURRENCY ||= 20
+    MISSING_UPLOADS_RAKE_TASK_NAME = "posts:missing_uploads"
+    UPLOAD_CONCURRENCY = 20
 
     def initialize(s3_options:, dry_run: false, migrate_to_multisite: false)
       @s3_bucket = s3_options[:bucket]
@@ -211,7 +211,8 @@ module FileStore
         UPLOAD_CONCURRENCY.times.map do
           Thread.new do
             while obj = queue.pop
-              if s3.put_object(obj[:options])
+              opts_with_file = obj[:options].merge(body: File.open(obj[:path], "rb"))
+              if s3.put_object(opts_with_file)
                 putc "."
                 lock.synchronize { synced += 1 }
               else
@@ -236,13 +237,11 @@ module FileStore
         end
 
         options = {
-          acl: SiteSetting.s3_use_acls ? "public-read" : nil,
-          body: File.open(path, "rb"),
           bucket: bucket,
           content_type: MiniMime.lookup_by_filename(name)&.content_type,
           content_md5: content_md5,
           key: key,
-        }
+        }.merge(FileStore::S3Store.default_s3_options(secure: false))
 
         if !FileHelper.is_supported_image?(name)
           upload = Upload.find_by(url: "/#{file}")
@@ -254,8 +253,11 @@ module FileStore
             )
           end
 
-          options[:acl] = "private" if upload&.secure
-        elsif !FileHelper.is_inline_image?(name)
+          if upload&.secure
+            options[:acl] = FileStore::S3Store.acl_option_value(secure: true)
+            options[:tagging] = FileStore::S3Store.visibility_tagging_option_value(secure: true)
+          end
+        elsif !FileHelper.is_svg?(name)
           upload = Upload.find_by(url: "/#{file}")
           options[:content_disposition] = ActionDispatch::Http::ContentDisposition.format(
             disposition: "attachment",

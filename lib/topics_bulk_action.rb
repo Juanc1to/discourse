@@ -36,7 +36,7 @@ class TopicsBulkAction
   end
 
   def perform!
-    unless TopicsBulkAction.operations.include?(@operation[:type])
+    if TopicsBulkAction.operations.exclude?(@operation[:type])
       raise Discourse::InvalidParameters.new(:operation)
     end
     # careful these are private methods, we need send
@@ -135,7 +135,12 @@ class TopicsBulkAction
     updatable_topics = topics.where.not(category_id: @operation[:category_id])
 
     if SiteSetting.create_revision_on_bulk_topic_moves
-      opts = { bypass_bump: true, validate_post: false, bypass_rate_limiter: true }
+      opts = {
+        bypass_bump: true,
+        validate_post: false,
+        bypass_rate_limiter: true,
+        silent: @operation[:silent],
+      }
 
       updatable_topics.each do |t|
         if guardian.can_edit?(t)
@@ -146,16 +151,22 @@ class TopicsBulkAction
     else
       updatable_topics.each do |t|
         if guardian.can_edit?(t)
-          @changed_ids << t.id if t.change_category_to_id(@operation[:category_id])
+          if t.change_category_to_id(@operation[:category_id], silent: @operation[:silent])
+            @changed_ids << t.id
+          end
         end
       end
     end
   end
 
   def change_notification_level
+    notification_level_id = @operation[:notification_level_id]
+
+    raise Discourse::InvalidParameters.new(:notification_level_id) if notification_level_id.blank?
+
     topics.each do |t|
       if guardian.can_see?(t)
-        TopicUser.change(@user, t.id, notification_level: @operation[:notification_level_id].to_i)
+        TopicUser.change(@user, t.id, notification_level: notification_level_id.to_i)
         @changed_ids << t.id
       end
     end
@@ -164,7 +175,12 @@ class TopicsBulkAction
   def close
     topics.each do |t|
       if guardian.can_moderate?(t)
-        t.update_status("closed", true, @user)
+        t.update_status(
+          "closed",
+          true,
+          @user,
+          { message: @operation[:message], silent_tracking: @operation[:silent] },
+        )
         @changed_ids << t.id
       end
     end
@@ -173,7 +189,12 @@ class TopicsBulkAction
   def unlist
     topics.each do |t|
       if guardian.can_moderate?(t)
-        t.update_status("visible", false, @user)
+        t.update_status(
+          "visible",
+          false,
+          @user,
+          { visibility_reason_id: Topic.visibility_reasons[:bulk_action] },
+        )
         @changed_ids << t.id
       end
     end
@@ -182,7 +203,12 @@ class TopicsBulkAction
   def relist
     topics.each do |t|
       if guardian.can_moderate?(t)
-        t.update_status("visible", true, @user)
+        t.update_status(
+          "visible",
+          true,
+          @user,
+          { visibility_reason_id: Topic.visibility_reasons[:bulk_action] },
+        )
         @changed_ids << t.id
       end
     end
@@ -246,7 +272,7 @@ class TopicsBulkAction
   def remove_tags
     topics.each do |t|
       if guardian.can_edit?(t)
-        TopicTag.where(topic_id: t.id).delete_all
+        TopicTag.where(topic_id: t.id).in_batches.destroy_all
         @changed_ids << t.id
       end
     end

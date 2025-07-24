@@ -1,12 +1,13 @@
 import DiscourseRoute from "discourse/routes/discourse";
+import { i18n } from "discourse-i18n";
 import Permalink from "admin/models/permalink";
 
 export default class AdminPermalinksRoute extends DiscourseRoute {
-  model() {
-    return Permalink.findAll();
+  titleToken() {
+    return i18n("admin.config.permalinks.title");
   }
 
-  setupController(controller, model) {
-    controller.set("model", model);
+  model() {
+    return Permalink.findAll();
   }
 }

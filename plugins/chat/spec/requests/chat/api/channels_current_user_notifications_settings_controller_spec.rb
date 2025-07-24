@@ -1,7 +1,7 @@
 # frozen_string_literal: true
 
 RSpec.describe Chat::Api::ChannelsCurrentUserNotificationsSettingsController do
-  fab!(:current_user) { Fabricate(:user) }
+  fab!(:current_user, :user)
 
   before do
     SiteSetting.chat_enabled = true
@@ -15,7 +15,7 @@ RSpec.describe Chat::Api::ChannelsCurrentUserNotificationsSettingsController do
                      { notifications_settings: { muted: true } }
 
     context "when category channel has invalid params" do
-      fab!(:channel_1) { Fabricate(:category_channel) }
+      fab!(:channel_1, :category_channel)
 
       before do
         channel_1.add(current_user)
@@ -42,7 +42,7 @@ RSpec.describe Chat::Api::ChannelsCurrentUserNotificationsSettingsController do
     end
 
     context "when category channel has valid params" do
-      fab!(:channel_1) { Fabricate(:category_channel) }
+      fab!(:channel_1, :category_channel)
 
       before do
         channel_1.add(current_user)
@@ -54,8 +54,7 @@ RSpec.describe Chat::Api::ChannelsCurrentUserNotificationsSettingsController do
             params: {
               notifications_settings: {
                 muted: true,
-                desktop_notification_level: "always",
-                mobile_notification_level: "never",
+                notification_level: "always",
               },
             }
 
@@ -67,13 +66,12 @@ RSpec.describe Chat::Api::ChannelsCurrentUserNotificationsSettingsController do
         membership = channel_1.membership_for(current_user)
 
         expect(membership.muted).to eq(true)
-        expect(membership.desktop_notification_level).to eq("always")
-        expect(membership.mobile_notification_level).to eq("never")
+        expect(membership.notification_level).to eq("always")
       end
     end
 
     context "when membership doesn’t exist" do
-      fab!(:channel_1) { Fabricate(:category_channel) }
+      fab!(:channel_1, :category_channel)
 
       before { sign_in(current_user) }
 
@@ -123,8 +121,7 @@ RSpec.describe Chat::Api::ChannelsCurrentUserNotificationsSettingsController do
             params: {
               notifications_settings: {
                 muted: true,
-                desktop_notification_level: "always",
-                mobile_notification_level: "never",
+                notification_level: "always",
               },
             }
 
@@ -136,8 +133,7 @@ RSpec.describe Chat::Api::ChannelsCurrentUserNotificationsSettingsController do
         membership = dm_channel_1.membership_for(current_user)
 
         expect(membership.muted).to eq(true)
-        expect(membership.desktop_notification_level).to eq("always")
-        expect(membership.mobile_notification_level).to eq("never")
+        expect(membership.notification_level).to eq("always")
       end
     end
   end

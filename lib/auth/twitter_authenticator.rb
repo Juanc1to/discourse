@@ -5,8 +5,26 @@ class Auth::TwitterAuthenticator < Auth::ManagedAuthenticator
     "twitter"
   end
 
+  def display_name
+    "X / Twitter"
+  end
+
+  def provider_url
+    "https://x.com"
+  end
+
   def enabled?
     SiteSetting.enable_twitter_logins
+  end
+
+  def healthy?
+    connection =
+      Faraday.new(url: "https://api.twitter.com") do |config|
+        config.basic_auth(SiteSetting.twitter_consumer_key, SiteSetting.twitter_consumer_secret)
+      end
+    connection.post("/oauth2/token").status == 200
+  rescue Faraday::Error
+    false
   end
 
   def after_authenticate(auth_token, existing_account: nil)

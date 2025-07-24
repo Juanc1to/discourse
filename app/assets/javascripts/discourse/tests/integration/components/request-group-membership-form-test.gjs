@@ -1,4 +1,4 @@
-import { getOwner } from "@ember/application";
+import { getOwner } from "@ember/owner";
 import { click, fillIn, render } from "@ember/test-helpers";
 import { module, test } from "qunit";
 import RequestGroupMembershipForm from "discourse/components/modal/request-group-membership-form";
@@ -18,9 +18,11 @@ module(
       });
       const model = { group };
 
-      await render(<template>
-        <RequestGroupMembershipForm @model={{model}} @inline={{true}} />
-      </template>);
+      await render(
+        <template>
+          <RequestGroupMembershipForm @model={{model}} @inline={{true}} />
+        </template>
+      );
 
       assert.dom("textarea").hasValue("plz accept thx");
       assert.dom(".btn-primary").isEnabled();

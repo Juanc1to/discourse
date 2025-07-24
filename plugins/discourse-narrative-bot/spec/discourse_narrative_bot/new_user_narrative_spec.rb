@@ -21,7 +21,7 @@ RSpec.describe DiscourseNarrativeBot::NewUserNarrative do
 
   fab!(:post) { Fabricate(:post, topic: topic, user: user) }
   fab!(:narrative) { described_class.new }
-  fab!(:other_topic) { Fabricate(:topic) }
+  fab!(:other_topic, :topic)
   fab!(:other_post) { Fabricate(:post, topic: other_topic) }
   fab!(:profile_page_url) { "#{Discourse.base_url}/users/#{user.username}" }
   fab!(:skip_trigger) { DiscourseNarrativeBot::TrackSelector.skip_trigger }
@@ -287,6 +287,22 @@ RSpec.describe DiscourseNarrativeBot::NewUserNarrative do
         )
       end
 
+      it "triggers the response when bookmarking the topic" do
+        Jobs.run_later!
+        topic = Fabricate(:topic)
+        post = Fabricate(:post, topic: topic)
+        bookmark = Fabricate(:bookmark, bookmarkable: topic)
+
+        expect_job_enqueued(
+          job: :bot_input,
+          args: {
+            user_id: bookmark.user_id,
+            post_id: post.id,
+            input: "bookmark",
+          },
+        )
+      end
+
       context "when the bookmark is created" do
         let(:profile_page_url) { "#{Discourse.base_url_no_prefix}/prefix/u/#{user.username}" }
         let(:new_post) { Post.last }
@@ -322,13 +338,7 @@ RSpec.describe DiscourseNarrativeBot::NewUserNarrative do
     end
 
     describe "onebox tutorial" do
-      before do
-        Oneboxer
-          .stubs(:cached_onebox)
-          .with("https://en.wikipedia.org/wiki/ROT13")
-          .returns("oneboxed Wikipedia")
-        narrative.set_data(user, state: :tutorial_onebox, topic_id: topic.id)
-      end
+      before { narrative.set_data(user, state: :tutorial_onebox, topic_id: topic.id) }
 
       describe "when post is not in the right topic" do
         it "should not do anything" do
@@ -388,7 +398,7 @@ RSpec.describe DiscourseNarrativeBot::NewUserNarrative do
           before { SiteSetting.enable_emoji = false }
 
           it "should create the right reply" do
-            post.update!(raw: "https://en.wikipedia.org/wiki/ROT13")
+            post.update!(raw: "https://en.wikipedia.org/wiki/Death_by_coconut")
 
             narrative.input(:reply, user, post: post)
             new_post = Post.last
@@ -411,7 +421,7 @@ RSpec.describe DiscourseNarrativeBot::NewUserNarrative do
         end
 
         it "should create the right reply" do
-          post.update!(raw: "https://en.wikipedia.org/wiki/ROT13")
+          post.update!(raw: "https://en.wikipedia.org/wiki/Death_by_coconut")
 
           narrative.expects(:enqueue_timeout_job).with(user)
           narrative.input(:reply, user, post: post)
@@ -1032,7 +1042,7 @@ RSpec.describe DiscourseNarrativeBot::NewUserNarrative do
       let(:another_post) { Fabricate(:post, user: discobot_user, topic: topic) }
       let(:flag) do
         Fabricate(
-          :flag,
+          :flag_post_action,
           post: post,
           user: user,
           post_action_type_id: PostActionType.types[:inappropriate],
@@ -1040,7 +1050,7 @@ RSpec.describe DiscourseNarrativeBot::NewUserNarrative do
       end
       let(:other_flag) do
         Fabricate(
-          :flag,
+          :flag_post_action,
           post: another_post,
           user: user,
           post_action_type_id: PostActionType.types[:spam],
@@ -1128,7 +1138,13 @@ RSpec.describe DiscourseNarrativeBot::NewUserNarrative do
         new_post = Post.last
 
         expected_raw = <<~RAW
-          #{I18n.t("discourse_narrative_bot.new_user_narrative.flag.reply", base_uri: "")}
+          #{
+          I18n.t(
+            "discourse_narrative_bot.new_user_narrative.flag.reply",
+            base_uri: "",
+            group_url: Group.find(Group::AUTO_GROUPS[:staff]).full_url,
+          )
+        }
 
           #{I18n.t("discourse_narrative_bot.new_user_narrative.search.instructions", base_uri: "")}
         RAW
@@ -1166,7 +1182,7 @@ RSpec.describe DiscourseNarrativeBot::NewUserNarrative do
 
       describe "when post contain the right answer" do
         let(:post) { Fabricate(:post, user: discobot_user, topic: topic) }
-        let(:flag) { Fabricate(:flag, post: post, user: user) }
+        let(:flag) { Fabricate(:flag_post_action, post: post, user: user) }
 
         before do
           narrative.set_data(user, state: :tutorial_flag, topic_id: topic.id)

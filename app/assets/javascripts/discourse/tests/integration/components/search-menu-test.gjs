@@ -1,4 +1,10 @@
-import { click, fillIn, render, triggerKeyEvent } from "@ember/test-helpers";
+import {
+  click,
+  fillIn,
+  render,
+  settled,
+  triggerKeyEvent,
+} from "@ember/test-helpers";
 import { module, test } from "qunit";
 import SearchMenu, {
   DEFAULT_TYPE_FILTER,
@@ -6,8 +12,7 @@ import SearchMenu, {
 import searchFixtures from "discourse/tests/fixtures/search-fixtures";
 import { setupRenderingTest } from "discourse/tests/helpers/component-test";
 import pretender, { response } from "discourse/tests/helpers/create-pretender";
-import { exists, query } from "discourse/tests/helpers/qunit-helpers";
-import I18n from "discourse-i18n";
+import { i18n } from "discourse-i18n";
 
 // Note this isn't a full-fledge test of the search menu. Those tests are in
 // acceptance/search-test.js. This is simply about the rendering of the
@@ -30,70 +35,134 @@ module("Integration | Component | search-menu", function (hooks) {
       return response(searchFixtures["search/query"]);
     });
 
-    await render(<template><SearchMenu /></template>);
-
-    assert.ok(
-      exists(".show-advanced-search"),
-      "it shows full page search button"
+    await render(
+      <template>
+        <SearchMenu @location="test" @searchInputId="icon-search-input" />
+      </template>
     );
 
-    assert.notOk(exists(".menu-panel"), "Menu panel is not rendered yet");
+    assert
+      .dom(".show-advanced-search")
+      .exists("it shows full page search button");
 
-    await click("#search-term");
+    assert.dom(".menu-panel").doesNotExist("Menu panel is not rendered yet");
 
-    assert.ok(
-      exists(".menu-panel .search-menu-initial-options"),
-      "Menu panel is rendered with initial options"
-    );
+    await click("#icon-search-input");
 
-    await fillIn("#search-term", "test");
+    assert
+      .dom(".menu-panel .search-menu-initial-options")
+      .exists("Menu panel is rendered with initial options");
 
-    assert.strictEqual(
-      query(".label-suffix").textContent.trim(),
-      I18n.t("search.in_topics_posts"),
-      "search label reflects context of search"
-    );
+    await fillIn("#icon-search-input", "test");
 
-    await triggerKeyEvent("#search-term", "keyup", "Enter");
+    assert
+      .dom(".label-suffix")
+      .hasText(
+        i18n("search.in_topics_posts"),
+        "search label reflects context of search"
+      );
 
-    assert.ok(
-      exists(".search-result-topic"),
-      "search result is a list of topics"
-    );
+    await triggerKeyEvent("#icon-search-input", "keyup", "Enter");
 
-    await triggerKeyEvent("#search-term", "keydown", "Escape");
+    assert
+      .dom(".search-result-topic")
+      .exists("search result is a list of topics");
 
-    assert.notOk(exists(".menu-panel"), "Menu panel is gone");
+    await triggerKeyEvent("#icon-search-input", "keydown", "Escape");
 
-    await click("#search-term");
-    await click("#search-term");
+    assert.dom(".menu-panel").doesNotExist("Menu panel is gone");
 
-    assert.ok(
-      exists(".search-result-topic"),
-      "Clicking the term brought back search results"
-    );
+    await click("#icon-search-input");
+    await click("#icon-search-input");
+
+    assert
+      .dom(".search-result-topic")
+      .exists("Clicking the term brought back search results");
   });
 
   test("clicking outside results hides and blurs input", async function (assert) {
-    await render(<template><div id="click-me"><SearchMenu /></div></template>);
-    await click("#search-term");
-
-    assert.strictEqual(
-      document.activeElement,
-      query("#search-term"),
-      "Clicking the search term input focuses it"
+    await render(
+      <template>
+        <div id="click-me"><SearchMenu
+            @location="test"
+            @searchInputId="icon-search-input"
+          /></div>
+      </template>
     );
+    await click("#icon-search-input");
+
+    assert
+      .dom("#icon-search-input")
+      .isFocused("Clicking the search term input focuses it");
 
     await click("#click-me");
 
-    assert.strictEqual(
-      document.activeElement,
-      document.body,
-      "Clicking outside blurs focus and closes panel"
-    );
-    assert.notOk(
-      exists(".menu-panel .search-menu-initial-options"),
-      "Menu panel is hidden"
-    );
+    assert
+      .dom(document.body)
+      .isFocused("Clicking outside blurs focus and closes panel");
+    assert
+      .dom(".menu-panel .search-menu-initial-options")
+      .doesNotExist("Menu panel is hidden");
+  });
+
+  test("rendering without a searchInputId provided", async function (assert) {
+    await render(<template><SearchMenu @location="test" /></template>);
+
+    assert
+      .dom("#search-term.search-term__input")
+      .exists("input defaults to id of search-term");
+  });
+
+  test("search-context state changes updates the UI", async function (assert) {
+    const searchService = this.owner.lookup("service:search");
+
+    searchService.searchContext = null;
+    searchService.inTopicContext = false;
+    await render(<template><SearchMenu @location="test" /></template>);
+
+    assert
+      .dom(".search-context")
+      .doesNotExist("no search context button when searchContext is null");
+
+    searchService.searchContext = { type: "private_messages" };
+    await settled();
+
+    assert
+      .dom(".search-context")
+      .exists(
+        "PM context button appears when searchContext.type changes to private_messages"
+      );
+
+    await click(".search-context");
+
+    assert
+      .dom(".search-context")
+      .doesNotExist("PM context button disappears when clear btn is pressed");
+  });
+
+  test("PM inbox context can be restored after being cleared", async function (assert) {
+    const searchService = this.owner.lookup("service:search");
+
+    searchService.searchContext = { type: "private_messages" };
+    searchService.inTopicContext = false;
+
+    await render(<template><SearchMenu @location="test" /></template>);
+
+    assert.dom(".search-context").exists("PM context button appears initially");
+
+    await click(".search-context");
+    assert
+      .dom(".search-context")
+      .doesNotExist("PM context button disappears when cleared");
+
+    await click("#search-term");
+
+    await click(".search-menu-assistant-item .search-item-slug");
+
+    assert
+      .dom(".search-context")
+      .exists(
+        "PM context button reappears after selecting 'in:messages' suggestion"
+      );
   });
 });

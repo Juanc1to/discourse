@@ -5,6 +5,11 @@
 # https://translate.discourse.org/
 
 pl_PL:
+  admin_js:
+    admin:
+      site_settings:
+        categories:
+          styleguide: "Przewodnik po stylach Discourse"
   js:
     styleguide:
       title: "Przewodnik po stylach"
@@ -25,6 +30,8 @@ pl_PL:
           title: "Data/czas"
         menus:
           title: "Menu"
+        multi_select:
+          title: "Wybór wielokrotny"
         toasts:
           title: "Komunikaty podpowiedzi"
         font_scale:
@@ -34,8 +41,8 @@ pl_PL:
         icons:
           title: "Ikony"
           full_list: "Zobacz pełną listę niesamowitych ikon czcionek"
-        input_fields:
-          title: "Pola wejściowe"
+        forms:
+          title: "Formularze"
         buttons:
           title: "Przyciski"
         dropdowns:
@@ -74,6 +81,10 @@ pl_PL:
           title: "Powiadomienia tematu"
         post:
           title: "Wpis"
+        post_list:
+          title: "Lista postów"
+          empty_example: "<PostList /> pusty stan"
+          populated_example: "<PostList /> stan wypełniony"
         topic_map:
           title: "Mapa tematu"
         site_header:

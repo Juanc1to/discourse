@@ -5,12 +5,13 @@ import { isEmpty } from "@ember/utils";
 import { observes } from "@ember-decorators/object";
 import { Promise } from "rsvp";
 import { ajax } from "discourse/lib/ajax";
+import discourseComputed from "discourse/lib/decorators";
 import Category from "discourse/models/category";
 import GroupHistory from "discourse/models/group-history";
 import RestModel from "discourse/models/rest";
+import Site from "discourse/models/site";
 import Topic from "discourse/models/topic";
 import User from "discourse/models/user";
-import discourseComputed from "discourse-common/utils/decorators";
 
 export default class Group extends RestModel {
   static findAll(opts) {
@@ -43,6 +44,7 @@ export default class Group extends RestModel {
   requestersOffset = null;
 
   @equal("mentionable_level", 99) canEveryoneMention;
+
   init() {
     super.init(...arguments);
     this.setProperties({ members: [], requesters: [] });
@@ -343,7 +345,7 @@ export default class Group extends RestModel {
       incoming_email: this.incoming_email,
       smtp_server: this.smtp_server,
       smtp_port: this.smtp_port,
-      smtp_ssl: this.smtp_ssl,
+      smtp_ssl_mode: this.smtp_ssl_mode,
       smtp_enabled: this.smtp_enabled,
       imap_server: this.imap_server,
       imap_port: this.imap_port,
@@ -428,7 +430,7 @@ export default class Group extends RestModel {
   save(opts = {}) {
     return ajax(`/groups/${this.id}`, {
       type: "PUT",
-      data: Object.assign({ group: this.asJSON() }, opts),
+      data: { group: this.asJSON(), ...opts },
     });
   }
 
@@ -450,7 +452,7 @@ export default class Group extends RestModel {
     });
   }
 
-  findPosts(opts) {
+  async findPosts(opts) {
     opts = opts || {};
     const type = opts.type || "posts";
     const data = {};
@@ -463,13 +465,17 @@ export default class Group extends RestModel {
       data.category_id = parseInt(opts.categoryId, 10);
     }
 
-    return ajax(`/groups/${this.name}/${type}.json`, { data }).then((posts) => {
-      return posts.map((p) => {
-        p.user = User.create(p.user);
-        p.topic = Topic.create(p.topic);
-        p.category = Category.findById(p.category_id);
-        return EmberObject.create(p);
-      });
+    const result = await ajax(`/groups/${this.name}/${type}.json`, { data });
+
+    result.categories?.forEach((category) => {
+      Site.current().updateCategory(category);
+    });
+
+    return result.posts.map((p) => {
+      p.user = User.create(p.user);
+      p.topic = Topic.create(p.topic);
+      p.category = Category.findById(p.category_id);
+      return EmberObject.create(p);
     });
   }
 

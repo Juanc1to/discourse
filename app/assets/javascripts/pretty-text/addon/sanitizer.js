@@ -1,5 +1,9 @@
 import xss from "xss";
-import escape from "discourse-common/lib/escape";
+import escape from "discourse/lib/escape";
+
+// Should match any <iframe> without a src attribute
+const IFRAME_REGEXP =
+  /<iframe(?![^>]*\s+src\s*=)[^>]*>[\s\S]*?(<\/iframe\s*>|$)/gi;
 
 function attr(name, value) {
   if (value) {
@@ -129,7 +133,11 @@ export function sanitize(text, allowLister) {
             name === "src" &&
             !value.match(/\/\.+\//) &&
             allowedIframes.some((i) => {
-              return value.toLowerCase().startsWith((i || "").toLowerCase());
+              const regex = i
+                // escape regex, keeping *
+                .replace(/[.+?^${}()|[\]\\]/g, "\\$&")
+                .replace(/\*/g, "[^/]+");
+              return new RegExp(`^${regex}.*$`, "i").test(value);
             }))
         ) {
           return attr(name, value);
@@ -146,7 +154,8 @@ export function sanitize(text, allowLister) {
         }
 
         if (tag === "iframe" && name === "src") {
-          return "-STRIP-";
+          // This iframe is not allowed
+          return "";
         }
 
         if (tag === "video" && name === "autoplay") {
@@ -176,7 +185,7 @@ export function sanitize(text, allowLister) {
 
   return result
     .replace(/\[removed\]/g, "")
-    .replace(/\<iframe[^>]+\-STRIP\-[^>]*>[^<]*<\/iframe>/g, "")
+    .replace(IFRAME_REGEXP, "")
     .replace(/&(?![#\w]+;)/g, "&amp;")
     .replace(/&#39;/g, "'")
     .replace(/ \/>/g, ">");

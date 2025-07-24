@@ -1,12 +1,10 @@
 # frozen_string_literal: true
 
-require "rails_helper"
-
 describe Chat::ChannelArchiveService do
   class FakeArchiveError < StandardError
   end
 
-  fab!(:channel) { Fabricate(:category_channel) }
+  fab!(:channel, :category_channel)
   fab!(:user) { Fabricate(:admin, refresh_auto_groups: true) }
   fab!(:category)
 
@@ -415,7 +413,6 @@ describe Chat::ChannelArchiveService do
       end
 
       it "handles errors gracefully, sends a private message to the archiving user, and is idempotent on retry" do
-        Rails.logger = @fake_logger = FakeLogger.new
         create_messages(35) && start_archive
 
         Chat::ChannelArchiveService

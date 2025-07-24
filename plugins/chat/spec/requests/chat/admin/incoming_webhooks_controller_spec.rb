@@ -1,28 +1,26 @@
 # frozen_string_literal: true
 
-require "rails_helper"
-
 RSpec.describe Chat::Admin::IncomingWebhooksController do
   fab!(:admin)
   fab!(:user)
-  fab!(:chat_channel1) { Fabricate(:category_channel) }
-  fab!(:chat_channel2) { Fabricate(:category_channel) }
+  fab!(:chat_channel1, :category_channel)
+  fab!(:chat_channel2, :category_channel)
 
   before { SiteSetting.chat_enabled = true }
 
   describe "#index" do
-    fab!(:existing1) { Fabricate(:incoming_chat_webhook) }
-    fab!(:existing2) { Fabricate(:incoming_chat_webhook) }
+    fab!(:existing1, :incoming_chat_webhook)
+    fab!(:existing2, :incoming_chat_webhook)
 
     it "blocks non-admin" do
       sign_in(user)
-      get "/admin/plugins/chat.json"
+      get "/admin/plugins/chat/hooks.json"
       expect(response.status).to eq(404)
     end
 
     it "Returns chat_channels and incoming_chat_webhooks for admin" do
       sign_in(admin)
-      get "/admin/plugins/chat.json"
+      get "/admin/plugins/chat/hooks.json"
       expect(response.status).to eq(200)
       expect(
         response.parsed_body["incoming_chat_webhooks"].map { |webhook| webhook["id"] },

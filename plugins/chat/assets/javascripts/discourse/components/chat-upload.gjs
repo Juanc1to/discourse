@@ -2,13 +2,14 @@ import Component from "@glimmer/component";
 import { tracked } from "@glimmer/tracking";
 import { on } from "@ember/modifier";
 import { action } from "@ember/object";
-import { inject as service } from "@ember/service";
+import { service } from "@ember/service";
 import { htmlSafe } from "@ember/template";
+import { eq } from "truth-helpers";
 import { isAudio, isImage, isVideo } from "discourse/lib/uploads";
-import eq from "truth-helpers/helpers/eq";
 
 export default class ChatUpload extends Component {
   @service siteSettings;
+  @service capabilities;
 
   @tracked loaded = false;
 
@@ -54,6 +55,13 @@ export default class ChatUpload extends Component {
     }
   }
 
+  get videoSourceUrl() {
+    const baseUrl = this.args.upload.url;
+    return this.capabilities.isIOS || this.capabilities.isSafari
+      ? `${baseUrl}#t=0.001`
+      : baseUrl;
+  }
+
   @action
   imageLoaded() {
     this.loaded = true;
@@ -76,7 +84,7 @@ export default class ChatUpload extends Component {
       />
     {{else if (eq this.type this.VIDEO_TYPE)}}
       <video class="chat-video-upload" preload="metadata" height="150" controls>
-        <source src={{@upload.url}} />
+        <source src={{this.videoSourceUrl}} />
       </video>
     {{else if (eq this.type this.AUDIO_TYPE)}}
       <audio class="chat-audio-upload" preload="metadata" controls>

@@ -36,7 +36,7 @@ RSpec.describe WebHook do
 
   context "with web hooks" do
     fab!(:post_hook) { Fabricate(:web_hook, payload_url: " https://example.com ") }
-    fab!(:topic_hook) { Fabricate(:topic_web_hook) }
+    fab!(:topic_hook, :topic_web_hook)
 
     it "removes whitespace from payload_url before saving" do
       expect(post_hook.payload_url).to eq("https://example.com")
@@ -57,7 +57,7 @@ RSpec.describe WebHook do
       assign_event_types = WebHookEventType.active.where(group: "assign").pluck(:name)
       expect(assign_event_types).to eq(%w[assigned unassigned])
 
-      SiteSetting.stubs(:voting_enabled).returns(true)
+      SiteSetting.stubs(:topic_voting_enabled).returns(true)
       voting_event_types = WebHookEventType.active.where(group: "voting").pluck(:name)
       expect(voting_event_types).to eq(%w[topic_upvote topic_unvote])
       #
@@ -93,7 +93,7 @@ RSpec.describe WebHook do
       end
 
       describe "wildcard web hooks" do
-        fab!(:wildcard_hook) { Fabricate(:wildcard_web_hook) }
+        fab!(:wildcard_hook, :wildcard_web_hook)
 
         it "should include wildcard hooks" do
           expect(WebHook.active_web_hooks(:wildcard)).to eq([wildcard_hook])
@@ -124,7 +124,7 @@ RSpec.describe WebHook do
       end
 
       context "when including wildcard hooks" do
-        fab!(:wildcard_hook) { Fabricate(:wildcard_web_hook) }
+        fab!(:wildcard_hook, :wildcard_web_hook)
 
         describe "#enqueue_hooks" do
           it "enqueues hooks with ids" do
@@ -361,6 +361,27 @@ RSpec.describe WebHook do
       expect(job_args["event_name"]).to eq("topic_recovered")
       payload = JSON.parse(job_args["payload"])
       expect(payload["id"]).to eq(post.topic.id)
+    end
+
+    it "should serialize the right topic posts counts when a post is deleted" do
+      Fabricate(:web_hook)
+
+      Jobs::EmitWebHookEvent.jobs.clear
+
+      post2 =
+        PostCreator.create!(
+          user,
+          raw: "post",
+          topic_id: topic.id,
+          reply_to_post_number: post.post_number,
+          skip_validations: true,
+        )
+      PostDestroyer.new(user, post2).destroy
+
+      job_args = Jobs::EmitWebHookEvent.jobs.last["args"].first
+      payload = JSON.parse(job_args["payload"])
+      expect(payload["topic_posts_count"]).to eq(1)
+      expect(payload["topic_filtered_posts_count"]).to eq(1)
     end
 
     it "should enqueue the destroyed hooks with tag filter for post events" do
@@ -671,7 +692,7 @@ RSpec.describe WebHook do
 
     context "with like created hooks" do
       fab!(:like_web_hook)
-      fab!(:another_user) { Fabricate(:user) }
+      fab!(:another_user, :user)
 
       it "should pass the group id to the emit webhook job" do
         group = Fabricate(:group)

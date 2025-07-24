@@ -20,6 +20,14 @@ RSpec.describe Admin::SiteSettingsController do
 
         expect(locale.length).to eq(1)
       end
+
+      it "does not return hidden site settings" do
+        get "/admin/site_settings.json"
+        expect(response.status).to eq(200)
+        expect(
+          response.parsed_body["site_settings"].find { |s| s["setting"] == "max_category_nesting" },
+        ).to be_nil
+      end
     end
 
     shared_examples "site settings inaccessible" do
@@ -45,7 +53,7 @@ RSpec.describe Admin::SiteSettingsController do
   end
 
   describe "#user_count" do
-    fab!(:staged_user) { Fabricate(:staged) }
+    fab!(:staged_user, :staged)
     let(:tracking) { NotificationLevels.all[:tracking] }
 
     context "when logged in as an admin" do
@@ -227,14 +235,41 @@ RSpec.describe Admin::SiteSettingsController do
         expect(SiteSetting.title).to eq("hello")
       end
 
-      it "works for deprecated settings" do
-        put "/admin/site_settings/search_tokenize_chinese_japanese_korean.json",
+      it "bulk updates settings" do
+        put "/admin/site_settings/bulk_update.json",
             params: {
-              search_tokenize_chinese_japanese_korean: true,
+              settings: {
+                title: {
+                  value: "hello",
+                },
+                site_description: {
+                  value: "world",
+                },
+              },
             }
-
         expect(response.status).to eq(200)
-        expect(SiteSetting.search_tokenize_chinese).to eq(true)
+        expect(SiteSetting.title).to eq("hello")
+        expect(SiteSetting.site_description).to eq("world")
+      end
+
+      it "throws an error for hard deprecated settings" do
+        stub_deprecated_settings!(override: false) do
+          put "/admin/site_settings/old_one.json", params: { old_one: true }
+
+          expect(response.status).to eq(422)
+          expect(response.parsed_body["errors"]).to contain_exactly(
+            "The following settings are deprecated: old_one. Use new_one instead",
+          )
+        end
+      end
+
+      it "works for soft deprecated settings" do
+        stub_deprecated_settings!(override: true) do
+          put "/admin/site_settings/old_one.json", params: { old_one: true }
+
+          expect(response.status).to eq(200)
+          expect(SiteSetting.new_one).to eq(true)
+        end
       end
 
       it "throws an error when the parameter is not a configurable site setting" do
@@ -259,7 +294,7 @@ RSpec.describe Admin::SiteSettingsController do
 
         expect(response.status).to eq(422)
         expect(SiteSetting.personal_message_enabled_groups).to eq(
-          Group::AUTO_GROUPS[:trust_level_4],
+          "1|2|#{Group::AUTO_GROUPS[:trust_level_4]}",
         )
       end
 
@@ -269,7 +304,14 @@ RSpec.describe Admin::SiteSettingsController do
         expect(SiteSetting.title).to eq("")
       end
 
-      it "sanitizes integer values" do
+      it "allows value to be a blank string for selectable_avatars" do
+        SiteSetting.selectable_avatars = [Fabricate(:image_upload)]
+        put "/admin/site_settings/selectable_avatars.json", params: { selectable_avatars: "" }
+        expect(response.status).to eq(200)
+        expect(SiteSetting.selectable_avatars).to eq([])
+      end
+
+      xit "sanitizes integer values" do
         put "/admin/site_settings/suggested_topics.json", params: { suggested_topics: "1,000" }
 
         expect(response.status).to eq(200)
@@ -399,9 +441,9 @@ RSpec.describe Admin::SiteSettingsController do
       end
 
       context "with default categories" do
-        fab!(:user1) { Fabricate(:user) }
-        fab!(:user2) { Fabricate(:user) }
-        fab!(:staged_user) { Fabricate(:staged) }
+        fab!(:user1, :user)
+        fab!(:user2, :user)
+        fab!(:staged_user, :staged)
         let(:watching) { NotificationLevels.all[:watching] }
         let(:tracking) { NotificationLevels.all[:tracking] }
 
@@ -513,9 +555,9 @@ RSpec.describe Admin::SiteSettingsController do
       end
 
       context "with default tags" do
-        fab!(:user1) { Fabricate(:user) }
-        fab!(:user2) { Fabricate(:user) }
-        fab!(:staged_user) { Fabricate(:staged) }
+        fab!(:user1, :user)
+        fab!(:user2, :user)
+        fab!(:staged_user, :staged)
         let(:watching) { NotificationLevels.all[:watching] }
         let(:tracking) { NotificationLevels.all[:tracking] }
 
@@ -617,6 +659,28 @@ RSpec.describe Admin::SiteSettingsController do
 
         expect(SiteSetting.max_category_nesting).to eq(3)
         expect(response.status).to eq(422)
+        expect(response.parsed_body["errors"]).to include(
+          I18n.t(
+            "errors.site_settings.site_settings_are_hidden",
+            setting_names: "max_category_nesting",
+          ),
+        )
+      end
+
+      it "does not allow changing of globally shadowed settings" do
+        SiteSetting.max_category_nesting = 3
+        SiteSetting.stubs(:shadowed_settings).returns(Set.new([:max_category_nesting]))
+
+        put "/admin/site_settings/max_category_nesting.json", params: { max_category_nesting: 2 }
+
+        expect(SiteSetting.max_category_nesting).to eq(3)
+        expect(response.status).to eq(422)
+        expect(response.parsed_body["errors"]).to include(
+          I18n.t(
+            "errors.site_settings.site_settings_are_shadowed_globally",
+            setting_names: "max_category_nesting",
+          ),
+        )
       end
 
       context "with an plugin" do

@@ -1,8 +1,8 @@
 # frozen_string_literal: true
 
 class WordWatcher
-  REPLACEMENT_LETTER ||= CGI.unescape_html("&#9632;")
-  CACHE_VERSION ||= 3
+  REPLACEMENT_LETTER = CGI.unescape_html("&#9632;")
+  CACHE_VERSION = 3
 
   def initialize(raw)
     @raw = raw
@@ -31,12 +31,11 @@ class WordWatcher
       .where(action: WatchedWord.actions[action.to_sym])
       .limit(WatchedWord::MAX_WORDS_PER_ACTION)
       .order(:id)
-      .pluck(:word, :replacement, :case_sensitive)
-      .to_h do |w, r, c|
-        [
-          word_to_regexp(w, match_word: false),
-          { word: w, replacement: r, case_sensitive: c }.compact,
-        ]
+      .pluck(:word, :replacement, :case_sensitive, :html)
+      .to_h do |w, r, c, h|
+        opts = { word: w, replacement: r, case_sensitive: c }.compact
+        opts[:html] = true if h
+        [word_to_regexp(w, match_word: false), opts]
       end
   end
 
@@ -222,6 +221,17 @@ class WordWatcher
     match_list.uniq!
     match_list.sort!
     match_list
+  end
+
+  def word_matches_across_all_actions
+    WatchedWord
+      .actions
+      .keys
+      .filter_map { |action| word_matches_for_action?(action, all_matches: true) }
+      .flatten
+      .compact
+      .uniq
+      .sort
   end
 
   def word_matches?(word, case_sensitive: false)

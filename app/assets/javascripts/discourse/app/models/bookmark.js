@@ -5,14 +5,14 @@ import { isEmpty } from "@ember/utils";
 import { Promise } from "rsvp";
 import { ajax } from "discourse/lib/ajax";
 import { formattedReminderTime } from "discourse/lib/bookmark";
+import discourseComputed from "discourse/lib/decorators";
 import { longDate } from "discourse/lib/formatter";
+import getURL from "discourse/lib/get-url";
 import { applyModelTransformations } from "discourse/lib/model-transformers";
 import RestModel from "discourse/models/rest";
 import Topic from "discourse/models/topic";
 import User from "discourse/models/user";
-import getURL from "discourse-common/lib/get-url";
-import discourseComputed from "discourse-common/utils/decorators";
-import I18n from "discourse-i18n";
+import { i18n } from "discourse-i18n";
 import Category from "./category";
 
 export const AUTO_DELETE_PREFERENCES = {
@@ -39,6 +39,18 @@ export default class Bookmark extends RestModel {
       bookmarkable_id: bookmarkableId,
       user_id: user.id,
       auto_delete_preference: user.user_option.bookmark_auto_delete_preference,
+    });
+  }
+
+  static bulkOperation(bookmarks, operation) {
+    const data = {
+      bookmark_ids: bookmarks.mapBy("id"),
+      operation,
+    };
+
+    return ajax("/bookmarks/bulk", {
+      type: "PUT",
+      data,
     });
   }
 
@@ -116,17 +128,17 @@ export default class Bookmark extends RestModel {
       const createdAtStr = moment(createdAt).format(BUMPED_FORMAT);
 
       return bumpedAtStr !== createdAtStr
-        ? `${I18n.t("topic.created_at", {
+        ? `${i18n("topic.created_at", {
             date: longDate(createdAt),
-          })}\n${I18n.t("topic.bumped_at", { date: longDate(bumpedAt) })}`
-        : I18n.t("topic.created_at", { date: longDate(createdAt) });
+          })}\n${i18n("topic.bumped_at", { date: longDate(bumpedAt) })}`
+        : i18n("topic.created_at", { date: longDate(createdAt) });
     }
   }
 
   @discourseComputed("name", "reminder_at")
   reminderTitle(name, reminderAt) {
     if (!isEmpty(reminderAt)) {
-      return I18n.t("bookmarks.created_with_reminder_generic", {
+      return i18n("bookmarks.created_with_reminder_generic", {
         date: formattedReminderTime(
           reminderAt,
           this.currentUser?.user_option?.timezone || moment.tz.guess()
@@ -135,7 +147,7 @@ export default class Bookmark extends RestModel {
       });
     }
 
-    return I18n.t("bookmarks.created_generic", {
+    return i18n("bookmarks.created_generic", {
       name: name || "",
     });
   }
@@ -203,5 +215,10 @@ export default class Bookmark extends RestModel {
   @discourseComputed("bookmarkable_type")
   bookmarkableTopicAlike(bookmarkable_type) {
     return ["Topic", "Post"].includes(bookmarkable_type);
+  }
+
+  @discourseComputed("reminder_at", "name")
+  hasMetadata() {
+    return this.reminder_at || this.name;
   }
 }

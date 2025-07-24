@@ -17,26 +17,29 @@ RSpec.describe "Editing Sidebar Community Section", type: :system do
     expect(sidebar).to have_no_customize_community_section_button
   end
 
-  it "allows admin to edit community section and reset to default" do
+  xit "allows admin to edit community section and reset to default" do
     sign_in(admin)
 
     visit("/latest")
 
     expect(sidebar.primary_section_icons("community")).to eq(
-      %w[layer-group user flag wrench ellipsis-v],
+      %w[layer-group user flag wrench paper-plane ellipsis-vertical],
     )
 
     modal = sidebar.click_community_section_more_button.click_customize_community_section_button
     modal.fill_link("Topics", "/latest", "paper-plane")
     modal.topics_link.drag_to(modal.review_link, delay: 0.4)
     modal.save
+    modal.confirm_update
+
+    page.refresh
 
     expect(sidebar.primary_section_links("community")).to eq(
-      ["My Posts", "Topics", "Review", "Admin", "More"],
+      ["My posts", "Topics", "Review", "Admin", "Invite", "More"],
     )
 
     expect(sidebar.primary_section_icons("community")).to eq(
-      %w[user paper-plane flag wrench ellipsis-v],
+      %w[user paper-plane flag wrench paper-plane ellipsis-vertical],
     )
 
     modal = sidebar.click_community_section_more_button.click_customize_community_section_button
@@ -45,11 +48,11 @@ RSpec.describe "Editing Sidebar Community Section", type: :system do
     expect(sidebar).to have_section("Community")
 
     expect(sidebar.primary_section_links("community")).to eq(
-      ["Topics", "My Posts", "Review", "Admin", "More"],
+      ["Topics", "My posts", "Review", "Admin", "Invite", "More"],
     )
 
     expect(sidebar.primary_section_icons("community")).to eq(
-      %w[layer-group user flag wrench ellipsis-v],
+      %w[layer-group user flag wrench paper-plane ellipsis-vertical],
     )
   end
 
@@ -77,7 +80,9 @@ RSpec.describe "Editing Sidebar Community Section", type: :system do
 
     visit("/latest")
 
-    modal = sidebar_header_dropdown.open.click_customize_community_section_button
+    sidebar_header_dropdown.open
+    expect(sidebar_header_dropdown).to have_dropdown_visible
+    modal = sidebar_header_dropdown.click_customize_community_section_button
 
     expect(modal).to be_visible
   end

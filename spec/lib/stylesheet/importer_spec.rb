@@ -7,154 +7,9 @@ RSpec.describe Stylesheet::Importer do
     Stylesheet::Compiler.compile_asset(name, options)[0]
   end
 
-  describe "#category_backgrounds" do
-    it "uses the correct background image based in the color scheme" do
-      background = Fabricate(:upload)
-      background_dark = Fabricate(:upload)
-
-      parent_category = Fabricate(:category)
-      category =
-        Fabricate(
-          :category,
-          parent_category_id: parent_category.id,
-          uploaded_background: background,
-          uploaded_background_dark: background_dark,
-        )
-
-      # light color schemes
-      ["Neutral", "Shades of Blue", "WCAG", "Summer", "Solarized Light"].each do |scheme_name|
-        scheme = ColorScheme.create_from_base(name: "Light Test", base_scheme_id: scheme_name)
-
-        compiled_css = compile_css("color_definitions", { color_scheme_id: scheme.id })
-
-        expect(compiled_css).to include(
-          "body.category-#{parent_category.slug}-#{category.slug}{background-image:url(#{background.url})}",
-        )
-        expect(compiled_css).not_to include(background_dark.url)
-      end
-
-      # dark color schemes
-      [
-        "Dark",
-        "Grey Amber",
-        "Latte",
-        "Dark Rose",
-        "WCAG Dark",
-        "Dracula",
-        "Solarized Dark",
-      ].each do |scheme_name|
-        scheme = ColorScheme.create_from_base(name: "Light Test", base_scheme_id: scheme_name)
-
-        compiled_css = compile_css("color_definitions", { color_scheme_id: scheme.id })
-
-        expect(compiled_css).not_to include(background.url)
-        expect(compiled_css).to include(
-          "body.category-#{parent_category.slug}-#{category.slug}{background-image:url(#{background_dark.url})}",
-        )
-      end
-    end
-
-    it "applies CDN to background category images" do
-      expect(compile_css("color_definitions")).to_not include("body.category-")
-
-      background = Fabricate(:upload)
-      background_dark = Fabricate(:upload)
-
-      parent_category = Fabricate(:category)
-      category =
-        Fabricate(
-          :category,
-          parent_category_id: parent_category.id,
-          uploaded_background: background,
-          uploaded_background_dark: background_dark,
-        )
-
-      compiled_css = compile_css("color_definitions")
-      expect(compiled_css).to include(
-        "body.category-#{parent_category.slug}-#{category.slug}{background-image:url(#{background.url})}",
-      )
-
-      GlobalSetting.stubs(:cdn_url).returns("//awesome.cdn")
-      compiled_css = compile_css("color_definitions")
-      expect(compiled_css).to include(
-        "body.category-#{parent_category.slug}-#{category.slug}{background-image:url(//awesome.cdn#{background.url})}",
-      )
-    end
-
-    it "applies CDN to dark background category images" do
-      scheme = ColorScheme.create_from_base(name: "Dark Test", base_scheme_id: "Dark")
-      expect(compile_css("color_definitions", { color_scheme_id: scheme.id })).to_not include(
-        "body.category-",
-      )
-
-      background = Fabricate(:upload)
-      background_dark = Fabricate(:upload)
-
-      parent_category = Fabricate(:category)
-      category =
-        Fabricate(
-          :category,
-          parent_category_id: parent_category.id,
-          uploaded_background: background,
-          uploaded_background_dark: background_dark,
-        )
-
-      compiled_css = compile_css("color_definitions", { color_scheme_id: scheme.id })
-      expect(compiled_css).to include(
-        "body.category-#{parent_category.slug}-#{category.slug}{background-image:url(#{background_dark.url})}",
-      )
-
-      GlobalSetting.stubs(:cdn_url).returns("//awesome.cdn")
-      compiled_css = compile_css("color_definitions", { color_scheme_id: scheme.id })
-      expect(compiled_css).to include(
-        "body.category-#{parent_category.slug}-#{category.slug}{background-image:url(//awesome.cdn#{background_dark.url})}",
-      )
-    end
-
-    it "applies S3 CDN to background category images" do
-      setup_s3
-      SiteSetting.s3_use_iam_profile = true
-      SiteSetting.s3_upload_bucket = "test"
-      SiteSetting.s3_region = "ap-southeast-2"
-      SiteSetting.s3_cdn_url = "https://s3.cdn"
-
-      background = Fabricate(:upload_s3)
-      category = Fabricate(:category, uploaded_background: background)
-
-      compiled_css = compile_css("color_definitions")
-      expect(compiled_css).to include(
-        "body.category-#{category.slug}{background-image:url(https://s3.cdn/original",
-      )
-    end
-
-    it "applies S3 CDN to dark background category images" do
-      scheme = ColorScheme.create_from_base(name: "Dark Test", base_scheme_id: "WCAG Dark")
-
-      setup_s3
-      SiteSetting.s3_use_iam_profile = true
-      SiteSetting.s3_upload_bucket = "test"
-      SiteSetting.s3_region = "ap-southeast-2"
-      SiteSetting.s3_cdn_url = "https://s3.cdn"
-
-      background = Fabricate(:upload_s3)
-      background_dark = Fabricate(:upload_s3)
-      category =
-        Fabricate(
-          :category,
-          uploaded_background: background,
-          uploaded_background_dark: background_dark,
-        )
-
-      compiled_css = compile_css("color_definitions", { color_scheme_id: scheme.id })
-      expect(compiled_css).to include(
-        "body.category-#{category.slug}{background-image:url(https://s3.cdn/original",
-      )
-    end
-  end
-
   describe "#font" do
     it "includes font variable" do
-      default_font = ":root{--font-family: Arial, sans-serif}"
+      default_font = ":root{--font-family: Inter, Arial, sans-serif}"
       expect(compile_css("color_definitions")).to include(default_font)
       expect(compile_css("embed")).to include(default_font)
       expect(compile_css("publish")).to include(default_font)
@@ -193,14 +48,15 @@ RSpec.describe Stylesheet::Importer do
   end
 
   describe "#import_color_definitions" do
-    let(:scss) { ":root{--custom-color: green}" }
+    let(:input_scss) { ':root{--custom-color: green;--core-color: #{$primary}}' }
+    let(:output_scss) { ":root{--custom-color: green;--core-color: #222}" }
     let(:scss_child) do
       "$navy: #000080; :root{--custom-color: red; --custom-color-rgb: \#{hexToRGB($navy)}}"
     end
 
     let(:theme) do
       Fabricate(:theme).tap do |t|
-        t.set_field(target: :common, name: "color_definitions", value: scss)
+        t.set_field(target: :common, name: "color_definitions", value: input_scss)
         t.save!
       end
     end
@@ -214,7 +70,7 @@ RSpec.describe Stylesheet::Importer do
 
     it "should include color definitions in the theme" do
       styles = Stylesheet::Importer.new({ theme_id: theme.id }).import_color_definitions
-      expect(styles).to include(scss)
+      expect(styles).to include(output_scss)
     end
 
     it "should include color definitions from components" do
@@ -230,7 +86,7 @@ RSpec.describe Stylesheet::Importer do
     it "should include default theme color definitions" do
       SiteSetting.default_theme_id = theme.id
       styles = Stylesheet::Importer.new({}).import_color_definitions
-      expect(styles).to include(scss)
+      expect(styles).to include(output_scss)
     end
   end
 

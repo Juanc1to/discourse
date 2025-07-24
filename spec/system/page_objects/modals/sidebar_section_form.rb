@@ -8,10 +8,11 @@ module PageObjects
       end
 
       def fill_link(name, url, icon = "link")
-        fill_in "link-name", with: name, match: :first
-        fill_in "link-url", with: url, match: :first
+        fill_in("link-name", with: name, match: :first)
+        fill_in("link-url", with: url, match: :first)
         find(".sidebar-section-form-link .select-kit summary", match: :first).click
-        fill_in "filter-input-search", with: icon, match: :first
+        fill_in("filter-input-search", with: icon, match: :first)
+        page.execute_script("window.scrollBy(0,10000)") # this a workaround for subfolder where page UI is broken
         find(".select-kit-row.is-highlighted", match: :first).click
       end
 
@@ -28,7 +29,13 @@ module PageObjects
       end
 
       def confirm_delete
+        find(".dialog-container .btn-danger").click
+        closed?
+      end
+
+      def confirm_update
         find(".dialog-container .btn-primary").click
+        closed?
       end
 
       def reset
@@ -40,7 +47,6 @@ module PageObjects
 
       def save
         find("#save-section").click
-        closed?
         self
       end
 

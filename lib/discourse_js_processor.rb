@@ -6,58 +6,9 @@ class DiscourseJsProcessor
   class TranspileError < StandardError
   end
 
-  # To generate a list of babel plugins used by ember-cli, set
-  # babel: { debug: true } in ember-cli-build.js, then run `yarn ember build -prod`
-  DISCOURSE_COMMON_BABEL_PLUGINS = [
-    ["proposal-decorators", { legacy: true }],
-    "proposal-class-properties",
-    "proposal-private-methods",
-    "proposal-class-static-block",
-    "transform-parameters",
-    "proposal-export-namespace-from",
-  ]
-
-  def self.ember_cli?(filename)
-    filename.include?("/app/assets/javascripts/discourse/dist/")
-  end
-
-  def self.call(input)
-    root_path = input[:load_path] || ""
-    logical_path =
-      (input[:filename] || "").sub(root_path, "").gsub(/\.(js|es6).*$/, "").sub(%r{^/}, "")
-    data = input[:data]
-
-    data = transpile(data, root_path, logical_path) if should_transpile?(input[:filename])
-
-    { data: data }
-  end
-
   def self.transpile(data, root_path, logical_path, theme_id: nil, extension: nil)
     transpiler = Transpiler.new(skip_module: skip_module?(data))
     transpiler.perform(data, root_path, logical_path, theme_id: theme_id, extension: extension)
-  end
-
-  def self.should_transpile?(filename)
-    filename ||= ""
-
-    # skip ember cli
-    return false if ember_cli?(filename)
-
-    # es6 is always transpiled
-    return true if filename.end_with?(".es6") || filename.end_with?(".es6.erb")
-
-    # For .js check the path...
-    return false unless filename.end_with?(".js") || filename.end_with?(".js.erb")
-
-    relative_path = filename.sub(Rails.root.to_s, "").sub(%r{^/*}, "")
-
-    js_root = "app/assets/javascripts"
-    test_root = "test/javascripts"
-
-    return false if relative_path.start_with?("#{js_root}/locales/")
-    return false if relative_path.start_with?("#{js_root}/plugins/")
-
-    !!(relative_path =~ %r{^#{js_root}/[^/]+/} || relative_path =~ %r{^#{test_root}/[^/]+/})
   end
 
   def self.skip_module?(data)
@@ -65,14 +16,7 @@ class DiscourseJsProcessor
   end
 
   class Transpiler
-    TRANSPILER_PATH =
-      (
-        if Rails.env.production?
-          "tmp/theme-transpiler.js"
-        else
-          "tmp/theme-transpiler/#{Process.pid}.js"
-        end
-      )
+    TRANSPILER_PATH = "tmp/theme-transpiler.js"
 
     @mutex = Mutex.new
     @ctx_init = Mutex.new
@@ -83,11 +27,17 @@ class DiscourseJsProcessor
     end
 
     def self.build_theme_transpiler
+      FileUtils.rm_rf("tmp/theme-transpiler") # cleanup old files - remove after Jan 2025
       Discourse::Utils.execute_command(
+        "pnpm",
+        "-C=app/assets/javascripts/theme-transpiler",
         "node",
-        "app/assets/javascripts/theme-transpiler/build.js",
-        TRANSPILER_PATH,
+        "build.js",
       )
+    end
+
+    def self.build_production_theme_transpiler
+      File.write(TRANSPILER_PATH, build_theme_transpiler)
       TRANSPILER_PATH
     end
 
@@ -100,10 +50,14 @@ class DiscourseJsProcessor
       ctx.attach("rails.logger.warn", proc { |err| Rails.logger.warn(err.to_s) })
       ctx.attach("rails.logger.error", proc { |err| Rails.logger.error(err.to_s) })
 
-      # Theme template AST transformation plugins
-      @processor_mutex.synchronize { build_theme_transpiler } if !Rails.env.production?
+      source =
+        if Rails.env.production?
+          File.read(TRANSPILER_PATH)
+        else
+          @processor_mutex.synchronize { build_theme_transpiler }
+        end
 
-      ctx.eval(File.read(TRANSPILER_PATH), filename: "theme-transpiler.js")
+      ctx.eval(source, filename: "theme-transpiler.js")
 
       ctx
     end
@@ -155,7 +109,14 @@ class DiscourseJsProcessor
       @skip_module = skip_module
     end
 
-    def perform(source, root_path = nil, logical_path = nil, theme_id: nil, extension: nil)
+    def perform(
+      source,
+      root_path = nil,
+      logical_path = nil,
+      theme_id: nil,
+      extension: nil,
+      generate_map: false
+    )
       self.class.v8_call(
         "transpile",
         source,
@@ -165,7 +126,7 @@ class DiscourseJsProcessor
           filename: logical_path || "unknown",
           extension: extension,
           themeId: theme_id,
-          commonPlugins: DISCOURSE_COMMON_BABEL_PLUGINS,
+          generateMap: generate_map,
         },
       )
     end
@@ -193,6 +154,16 @@ class DiscourseJsProcessor
 
     def terser(tree, opts)
       self.class.v8_call("minify", tree, opts, fetch_result_call: "getMinifyResult")
+    end
+
+    def post_css(css:, map:, source_map_file:)
+      self.class.v8_call(
+        "postCss",
+        css,
+        map,
+        source_map_file,
+        fetch_result_call: "getPostCssResult",
+      )
     end
   end
 end

@@ -5,13 +5,29 @@ end
 
 # intelligent fork based demonizer
 class Demon::Base
+  HOSTNAME = Socket.gethostname
+
   def self.demons
     @demons
   end
 
-  def self.start(count = 1, verbose: false)
+  if Rails.env.test?
+    def self.set_demons(demons)
+      @demons = demons
+    end
+
+    def self.reset_demons
+      @demons = {}
+    end
+
+    def set_pid(pid)
+      @pid = pid
+    end
+  end
+
+  def self.start(count = 1, verbose: false, logger: nil)
     @demons ||= {}
-    count.times { |i| (@demons["#{prefix}_#{i}"] ||= new(i, verbose: verbose)).start }
+    count.times { |i| (@demons["#{prefix}_#{i}"] ||= new(i, verbose:, logger:)).start }
   end
 
   def self.stop
@@ -21,10 +37,7 @@ class Demon::Base
 
   def self.restart
     return unless @demons
-    @demons.values.each do |demon|
-      demon.stop
-      demon.start
-    end
+    @demons.values.each { |demon| demon.restart }
   end
 
   def self.ensure_running
@@ -37,16 +50,19 @@ class Demon::Base
   end
 
   attr_reader :pid, :parent_pid, :started, :index
-  attr_accessor :stop_timeout
 
-  def initialize(index, rails_root: nil, parent_pid: nil, verbose: false)
+  def initialize(index, rails_root: nil, parent_pid: nil, verbose: false, logger: nil)
     @index = index
     @pid = nil
     @parent_pid = parent_pid || Process.pid
     @started = false
-    @stop_timeout = 10
     @rails_root = rails_root || Rails.root
     @verbose = verbose
+    @logger = logger || Logger.new(STDERR)
+  end
+
+  def log(message, level: :info)
+    @logger.public_send(level, message)
   end
 
   def pid_file
@@ -70,18 +86,28 @@ class Demon::Base
     "HUP"
   end
 
+  def stop_timeout
+    10
+  end
+
+  def restart
+    stop
+    start
+  end
+
   def stop
     @started = false
+
     if @pid
       Process.kill(stop_signal, @pid)
 
       wait_for_stop =
         lambda do
-          timeout = @stop_timeout
+          timeout = stop_timeout
 
           while alive? && timeout > 0
-            timeout -= (@stop_timeout / 10.0)
-            sleep(@stop_timeout / 10.0)
+            timeout -= (stop_timeout / 10.0)
+            sleep(stop_timeout / 10.0)
             begin
               Process.waitpid(@pid, Process::WNOHANG)
             rescue StandardError
@@ -99,7 +125,11 @@ class Demon::Base
       wait_for_stop.call
 
       if alive?
-        STDERR.puts "Process would not terminate cleanly, force quitting. pid: #{@pid} #{self.class}"
+        log(
+          "Process would not terminate cleanly, force quitting. pid: #{@pid} #{self.class}\n#{caller.join("\n")}",
+          level: :warn,
+        )
+
         Process.kill("KILL", @pid)
       end
 
@@ -125,8 +155,9 @@ class Demon::Base
       rescue StandardError
         -1
       end
+
     if dead
-      STDERR.puts "Detected dead worker #{@pid}, restarting..."
+      log("Detected dead worker #{@pid}, restarting...")
       @pid = nil
       @started = false
       start
@@ -138,7 +169,7 @@ class Demon::Base
 
     if existing = already_running?
       # should not happen ... so kill violently
-      STDERR.puts "Attempting to kill pid #{existing}"
+      log("Attempting to kill pid #{existing}")
       Process.kill("TERM", existing)
     end
 
@@ -147,6 +178,8 @@ class Demon::Base
   end
 
   def run
+    Discourse.before_fork if defined?(Discourse)
+
     @pid =
       fork do
         Process.setproctitle("discourse #{self.class.prefix}")
@@ -154,6 +187,7 @@ class Demon::Base
         establish_app
         after_fork
       end
+
     write_pid_file
   end
 
@@ -199,7 +233,7 @@ class Demon::Base
             Process.kill "KILL", Process.pid
           end
         rescue => e
-          STDERR.puts "URGENT monitoring thread had an exception #{e}"
+          log("URGENT monitoring thread had an exception #{e}", level: :error)
         end
         sleep 1
       end

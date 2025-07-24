@@ -1,6 +1,11 @@
 # frozen_string_literal: true
 
 class Admin::GroupsController < Admin::StaffController
+  MAX_AUTO_MEMBERSHIP_DOMAINS_LOOKUP = 10
+
+  def index
+  end
+
   def create
     guardian.ensure_can_create_group!
 
@@ -94,6 +99,15 @@ class Admin::GroupsController < Admin::StaffController
         domains -= existing_domains
       end
 
+      if domains.size > MAX_AUTO_MEMBERSHIP_DOMAINS_LOOKUP
+        raise Discourse::InvalidParameters.new(
+                I18n.t(
+                  "groups.errors.counting_too_many_email_domains",
+                  count: MAX_AUTO_MEMBERSHIP_DOMAINS_LOOKUP,
+                ),
+              )
+      end
+
       user_count = Group.automatic_membership_users(domains.join("|")).count
     end
 
@@ -137,7 +151,7 @@ class Admin::GroupsController < Admin::StaffController
       notify_users
     ]
     custom_fields = DiscoursePluginRegistry.editable_group_custom_fields
-    permitted << { custom_fields: custom_fields } unless custom_fields.blank?
+    permitted << { custom_fields: custom_fields } if custom_fields.present?
 
     permitted << { associated_group_ids: [] } if guardian.can_associate_groups?
 

@@ -2,7 +2,7 @@ import Component from "@glimmer/component";
 import { tracked } from "@glimmer/tracking";
 import { Input } from "@ember/component";
 import { action } from "@ember/object";
-import { inject as service } from "@ember/service";
+import { service } from "@ember/service";
 import DButton from "discourse/components/d-button";
 import UserLink from "discourse/components/user-link";
 import { ajax } from "discourse/lib/ajax";
@@ -11,7 +11,7 @@ import {
   getPasskeyCredential,
   isWebauthnSupported,
 } from "discourse/lib/webauthn";
-import I18n from "discourse-i18n";
+import { i18n } from "discourse-i18n";
 
 export default class ConfirmSession extends Component {
   @service dialog;
@@ -20,11 +20,12 @@ export default class ConfirmSession extends Component {
 
   @tracked errorMessage;
   @tracked resetEmailSent = null;
+  @tracked isLoading = false;
 
-  passwordLabel = I18n.t("user.password.title");
-  instructions = I18n.t("user.confirm_access.instructions");
-  loggedInAs = I18n.t("user.confirm_access.logged_in_as");
-  finePrint = I18n.t("user.confirm_access.fine_print");
+  passwordLabel = i18n("user.password.title");
+  instructions = i18n("user.confirm_access.instructions");
+  loggedInAs = i18n("user.confirm_access.logged_in_as");
+  finePrint = i18n("user.confirm_access.fine_print");
 
   get canUsePasskeys() {
     return (
@@ -55,7 +56,7 @@ export default class ConfirmSession extends Component {
         this.errorMessage = null;
         this.dialog.didConfirmWrapped();
       } else {
-        this.errorMessage = I18n.t("user.confirm_access.incorrect_passkey");
+        this.errorMessage = i18n("user.confirm_access.incorrect_passkey");
       }
     } catch (e) {
       popupAjaxError(e);
@@ -64,47 +65,50 @@ export default class ConfirmSession extends Component {
 
   @action
   async submit() {
-    this.errorMessage = this.password
-      ? null
-      : I18n.t("user.confirm_access.incorrect_password");
+    try {
+      this.isLoading = true;
 
-    const result = await ajax("/u/confirm-session.json", {
-      type: "POST",
-      data: {
-        password: this.password,
-      },
-    });
+      this.errorMessage = this.password
+        ? null
+        : i18n("user.confirm_access.incorrect_password");
 
-    if (result.success) {
-      this.errorMessage = null;
-      this.dialog.didConfirmWrapped();
-    } else {
-      this.errorMessage = I18n.t("user.confirm_access.incorrect_password");
+      const result = await ajax("/u/confirm-session.json", {
+        type: "POST",
+        data: {
+          password: this.password,
+        },
+      });
+
+      if (result.success) {
+        this.errorMessage = null;
+        this.dialog.didConfirmWrapped();
+      } else {
+        this.errorMessage = i18n("user.confirm_access.incorrect_password");
+      }
+    } finally {
+      this.isLoading = false;
     }
   }
 
   @action
   async sendPasswordResetEmail() {
     try {
-      const result = await ajax("/session/forgot_password.json", {
-        data: { login: this.currentUser.username },
-        type: "POST",
-      });
+      const result = await this.currentUser.changePassword();
 
       if (result.success) {
         this.errorMessage = null;
-        this.resetEmailSent = I18n.t(
+        this.resetEmailSent = i18n(
           "user.confirm_access.password_reset_email_sent"
         );
       } else {
-        this.errorMessage = I18n.t(
+        this.errorMessage = i18n(
           "user.confirm_access.cannot_send_password_reset_email"
         );
       }
     } catch (e) {
       this.errorMessage = extractError(
         e,
-        I18n.t("user.confirm_access.cannot_send_password_reset_email")
+        i18n("user.confirm_access.cannot_send_password_reset_email")
       );
     }
   }
@@ -140,6 +144,7 @@ export default class ConfirmSession extends Component {
               autofocus="autofocus"
             />
             <DButton
+              @isLoading={{this.isLoading}}
               class="btn-primary"
               @type="submit"
               @action={{this.submit}}
@@ -150,7 +155,7 @@ export default class ConfirmSession extends Component {
             <DButton
               @label="user.confirm_access.forgot_password"
               @action={{this.sendPasswordResetEmail}}
-              @class="btn-link btn-flat confirm-session__reset-btn"
+              class="btn-link btn-flat confirm-session__reset-btn"
             />
             {{#if this.resetEmailSent}}
               <span class="confirm-session__reset-email-sent">

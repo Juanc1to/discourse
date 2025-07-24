@@ -30,6 +30,15 @@
                 "text_color": {
                   "type": "string"
                 },
+                "style_type": {
+                  "type": "string"
+                },
+                "emoji": {
+                  "type": ["string", "null"]
+                },
+                "icon": {
+                  "type": ["string", "null"]
+                },
                 "slug": {
                   "type": "string"
                 },
@@ -77,6 +86,12 @@
                 },
                 "has_children": {
                   "type": "boolean"
+                },
+                "subcategory_count": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
                 },
                 "sort_order": {
                   "type": [
@@ -180,6 +195,9 @@
                 "name",
                 "color",
                 "text_color",
+                "style_type",
+                "emoji",
+                "icon",
                 "slug",
                 "topic_count",
                 "post_count",
@@ -194,6 +212,7 @@
                 "can_edit",
                 "topic_template",
                 "has_children",
+                "subcategory_count",
                 "sort_order",
                 "sort_ascending",
                 "show_subcategory_list",

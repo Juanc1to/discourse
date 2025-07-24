@@ -330,6 +330,8 @@ RSpec.describe SiteSettingExtension do
 
   describe "string setting with regex" do
     it "Supports custom validation errors" do
+      I18n.backend.store_translations(:en, { oops: "oops" })
+
       settings.setting(:test_str, "bob", regex: "hi", regex_error: "oops")
       settings.refresh!
 
@@ -420,9 +422,7 @@ RSpec.describe SiteSettingExtension do
       end
     end
 
-    let :test_enum_class do
-      TestEnumClass
-    end
+    let(:test_enum_class) { TestEnumClass }
 
     before do
       settings.setting(:test_enum, "en", enum: test_enum_class)
@@ -487,6 +487,39 @@ RSpec.describe SiteSettingExtension do
           :tests,
         )
       end
+    end
+  end
+
+  describe "a setting with an area" do
+    before do
+      settings.setting(:test_setting, 88, area: "flags")
+      settings.setting(:test_setting2, 89, area: "flags")
+      settings.setting(:test_setting4, 90)
+      settings.refresh!
+    end
+
+    it "should allow to filter by area" do
+      expect(settings.all_settings(filter_area: "flags").map { |s| s[:setting].to_sym }).to eq(
+        %i[default_locale test_setting test_setting2],
+      )
+    end
+
+    it "raised an error when area is invalid" do
+      expect {
+        settings.setting(:test_setting, 89, area: "invalid")
+        settings.refresh!
+      }.to raise_error(Discourse::InvalidParameters)
+    end
+
+    it "allows plugin to register valid areas" do
+      plugin = Plugin::Instance.new nil, "/tmp/test.rb"
+      plugin.register_site_setting_area("plugin_area")
+      settings.setting(:test_plugin_setting, 88, area: "plugin_area")
+      expect(
+        settings
+          .all_settings(filter_area: "plugin_area", include_locale_setting: false)
+          .map { |s| s[:setting].to_sym },
+      ).to eq(%i[test_plugin_setting])
     end
   end
 
@@ -566,6 +599,20 @@ RSpec.describe SiteSettingExtension do
       expect(settings.title).to eq("Discourse v2")
       expect(UserHistory.last.previous_value).to eq("Discourse v1")
       expect(UserHistory.last.new_value).to eq("Discourse v2")
+    end
+
+    it "does not create an entry in the staff action logs when new value is the same" do
+      expect { settings.set_and_log("title", "Discourse v1") }.not_to change { UserHistory.count }
+    end
+
+    context "when a detailed message is provided" do
+      let(:message) { "We really need to do this, see https://meta.discourse.org/t/123" }
+
+      it "adds the detailed message to the user history record" do
+        expect {
+          settings.set_and_log("title", "Discourse v2", Discourse.system_user, message)
+        }.to change { UserHistory.last.try(:details) }.to(message)
+      end
     end
   end
 
@@ -814,6 +861,45 @@ RSpec.describe SiteSettingExtension do
         expect(setting[:default]).to eq(system_upload.url)
       end
     end
+
+    context "with the filter_allowed_hidden argument" do
+      it "includes the specified hidden settings only if include_hidden is true" do
+        result =
+          SiteSetting
+            .all_settings(include_hidden: true, filter_allowed_hidden: [:about_banner_image])
+            .map { |ss| ss[:setting] }
+
+        expect(result).to include(:about_banner_image)
+        expect(result).not_to include(:community_owner)
+
+        result =
+          SiteSetting
+            .all_settings(include_hidden: false, filter_allowed_hidden: [:about_banner_image])
+            .map { |ss| ss[:setting] }
+
+        expect(result).not_to include(:about_banner_image)
+        expect(result).not_to include(:community_owner)
+
+        result =
+          SiteSetting
+            .all_settings(include_hidden: true, filter_allowed_hidden: [:community_owner])
+            .map { |ss| ss[:setting] }
+
+        expect(result).not_to include(:about_banner_image)
+        expect(result).to include(:community_owner)
+
+        result =
+          SiteSetting
+            .all_settings(
+              include_hidden: true,
+              filter_allowed_hidden: %i[about_banner_image community_owner],
+            )
+            .map { |ss| ss[:setting] }
+
+        expect(result).to include(:about_banner_image)
+        expect(result).to include(:community_owner)
+      end
+    end
   end
 
   describe ".client_settings_json_uncached" do
@@ -835,12 +921,18 @@ RSpec.describe SiteSettingExtension do
 
       expect(client_settings["with_html"]).to eq("<script></script>rest")
     end
+
+    it "does not include themeable site settings" do
+      SiteSetting.refresh!
+      expect(SiteSetting.client_settings_json_uncached).not_to include("enable_welcome_banner")
+      expect(SiteSetting.client_settings_json_uncached).not_to include("search_experience")
+    end
   end
 
   describe ".setup_methods" do
     describe "for uploads site settings" do
       fab!(:upload)
-      fab!(:upload2) { Fabricate(:upload) }
+      fab!(:upload2, :upload)
 
       it "should return the upload record" do
         settings.setting(:some_upload, upload.id.to_s, type: :upload)
@@ -853,6 +945,122 @@ RSpec.describe SiteSettingExtension do
         settings.some_upload = upload2
 
         expect(settings.some_upload).to eq(upload2)
+      end
+    end
+  end
+
+  describe "mandatory_values for group list settings" do
+    it "adds mandatory values" do
+      expect(SiteSetting.embedded_media_post_allowed_groups).to eq("1|2|10")
+
+      SiteSetting.embedded_media_post_allowed_groups = 14
+      expect(SiteSetting.embedded_media_post_allowed_groups).to eq("1|2|14")
+
+      SiteSetting.embedded_media_post_allowed_groups = ""
+      expect(SiteSetting.embedded_media_post_allowed_groups).to eq("1|2")
+
+      test_provider = SiteSetting.provider
+      SiteSetting.provider = SiteSettings::DbProvider.new(SiteSetting)
+      SiteSetting.embedded_media_post_allowed_groups = "13|14"
+      expect(SiteSetting.embedded_media_post_allowed_groups).to eq("1|2|13|14")
+      expect(SiteSetting.find_by(name: "embedded_media_post_allowed_groups").value).to eq(
+        "1|2|13|14",
+      )
+    ensure
+      SiteSetting.find_by(name: "embedded_media_post_allowed_groups").destroy
+      SiteSetting.provider = test_provider
+    end
+  end
+
+  describe "requires_confirmation settings" do
+    it "returns 'simple' for settings that require confirmation with 'simple' type" do
+      expect(
+        SiteSetting.all_settings.find { |s| s[:setting] == :min_password_length }[
+          :requires_confirmation
+        ],
+      ).to eq("simple")
+    end
+
+    it "returns nil for settings that do not require confirmation" do
+      expect(
+        SiteSetting.all_settings.find { |s| s[:setting] == :display_local_time_in_user_card }[
+          :requires_confirmation
+        ],
+      ).to eq(nil)
+    end
+  end
+
+  describe "themeable settings" do
+    fab!(:theme_1) { Fabricate(:theme) }
+    fab!(:theme_2) { Fabricate(:theme) }
+    fab!(:tss_1) do
+      Fabricate(
+        :theme_site_setting_with_service,
+        name: "enable_welcome_banner",
+        value: false,
+        theme: theme_1,
+      )
+    end
+    fab!(:tss_2) do
+      Fabricate(
+        :theme_site_setting_with_service,
+        name: "search_experience",
+        value: "search_field",
+        theme: theme_2,
+      )
+    end
+
+    it "has the site setting default values when there are no theme site settings for the theme" do
+      SiteSetting.refresh!
+      expect(SiteSetting.theme_site_settings[theme_1.id][:search_experience]).to eq("search_icon")
+      expect(SiteSetting.theme_site_settings[theme_2.id][:enable_welcome_banner]).to eq(true)
+    end
+
+    it "returns true for settings that are themeable" do
+      expect(SiteSetting.themeable[:enable_welcome_banner]).to eq(true)
+    end
+
+    it "returns false for settings that are not themeable" do
+      expect(SiteSetting.themeable[:title]).to eq(false)
+    end
+
+    it "caches the theme site setting values on a per theme basis" do
+      SiteSetting.refresh!
+      expect(SiteSetting.theme_site_settings[theme_1.id][:enable_welcome_banner]).to eq(false)
+      expect(SiteSetting.theme_site_settings[theme_2.id][:search_experience]).to eq("search_field")
+    end
+
+    it "overrides the site setting value with the theme site setting" do
+      SiteSetting.create!(
+        name: "enable_welcome_banner",
+        data_type: SiteSettings::TypeSupervisor.types[:bool],
+        value: "t",
+      )
+      SiteSetting.create!(
+        name: "search_experience",
+        data_type: SiteSettings::TypeSupervisor.types[:enum],
+        value: SiteSetting.type_supervisor.to_db_value(:search_experience, "search_icon"),
+      )
+      SiteSetting.refresh!
+      expect(SiteSetting.enable_welcome_banner(theme_id: theme_1.id)).to eq(false)
+      expect(SiteSetting.enable_welcome_banner(theme_id: theme_2.id)).to eq(true)
+      expect(SiteSetting.search_experience(theme_id: theme_1.id)).to eq("search_icon")
+      expect(SiteSetting.search_experience(theme_id: theme_2.id)).to eq("search_field")
+    end
+
+    describe ".theme_site_settings_json_uncached" do
+      it "returns the correct JSON" do
+        SiteSetting.refresh!
+        expect(SiteSetting.theme_site_settings_json_uncached(theme_1.id)).to eq(
+          %Q|{"enable_welcome_banner":false,"search_experience":"search_icon"}|,
+        )
+      end
+
+      it "returns default JSON when the theme_id is null" do
+        SiteSetting.refresh!
+        expect(SiteSetting.theme_site_settings_json_uncached(nil)).to eq(
+          %Q|{"enable_welcome_banner":true,"search_experience":"search_icon"}|,
+        )
       end
     end
   end
@@ -883,6 +1091,16 @@ RSpec.describe SiteSettingExtension do
       expect(SiteSetting.respond_to?(:discourse_connect_provider_secrets_map)).to eq(false)
     end
 
+    it "handles splitting emoji_list settings" do
+      SiteSetting.emoji_deny_list = "smile|frown"
+      expect(SiteSetting.emoji_deny_list_map).to eq(%w[smile frown])
+    end
+
+    it "handles splitting tag_list settings" do
+      SiteSetting.digest_suppress_tags = "blah|blah2"
+      expect(SiteSetting.digest_suppress_tags_map).to eq(%w[blah blah2])
+    end
+
     it "handles null values for settings" do
       SiteSetting.ga_universal_auto_link_domains = nil
       SiteSetting.pm_tags_allowed_for_groups = nil
@@ -891,6 +1109,185 @@ RSpec.describe SiteSettingExtension do
       expect(SiteSetting.ga_universal_auto_link_domains_map).to eq([])
       expect(SiteSetting.pm_tags_allowed_for_groups_map).to eq([])
       expect(SiteSetting.exclude_rel_nofollow_domains_map).to eq([])
+    end
+  end
+
+  describe "keywords" do
+    it "gets the list of I18n keywords for the setting" do
+      expect(SiteSetting.keywords(:clean_up_inactive_users_after_days)).to eq(
+        I18n.t("site_settings.keywords.clean_up_inactive_users_after_days").split("|"),
+      )
+    end
+
+    it "gets the current locale keywords and the english keywords for the setting" do
+      I18n.locale = :de
+      expect(SiteSetting.keywords(:clean_up_inactive_users_after_days)).to match_array(
+        (
+          I18n.t("site_settings.keywords.clean_up_inactive_users_after_days").split("|") +
+            I18n.t("site_settings.keywords.clean_up_inactive_users_after_days", locale: :en).split(
+              "|",
+            )
+        ).flatten,
+      )
+    end
+
+    context "when a setting also has an alias after renaming" do
+      before { SiteSetting.stubs(:deprecated_setting_alias).returns("some_old_setting") }
+
+      it "is included with the keywords" do
+        expect(SiteSetting.keywords(:clean_up_inactive_users_after_days)).to include(
+          "some_old_setting",
+        )
+      end
+    end
+  end
+
+  describe "humanized_name" do
+    it "returns the humanized name for a setting" do
+      expect(SiteSetting.humanized_name(:clean_up_inactive_users_after_days)).to eq(
+        "Clean up inactive users after days",
+      )
+    end
+
+    it "handles acronyms in setting names" do
+      expect(SiteSetting.humanized_name(:enable_linkedin_oidc_logins)).to eq(
+        "Enable LinkedIn OIDC logins",
+      )
+    end
+
+    it "handles mixed case in setting names" do
+      expect(SiteSetting.humanized_name(:opengraph_image)).to eq("OpenGraph image")
+    end
+  end
+
+  describe "logging Site Settings via the Rails Console" do
+    around do |example|
+      # Ensure Rails::Console is defined for the duration of each example.
+      if !Rails.const_defined?(:Console)
+        Rails.const_set("Console", Module.new)
+        example.run
+        Rails.send(:remove_const, "Console")
+      else
+        example.run
+      end
+    end
+
+    before do
+      settings.setting(:log_test, "initial")
+      settings.refresh!
+    end
+
+    context "when using the direct setter" do
+      it "logs the change exactly once" do
+        logger_spy = instance_spy(StaffActionLogger)
+        allow(StaffActionLogger).to receive(:new).with(Discourse.system_user).and_return(logger_spy)
+
+        settings.log_test = "changed"
+        expect(settings.log_test).to eq("changed")
+        expect(logger_spy).to have_received(:log_site_setting_change).with(
+          :log_test,
+          "initial",
+          "changed",
+          { details: "Updated via Rails console" },
+        ).once
+      end
+    end
+
+    context "when using set_and_log" do
+      it "logs the change exactly once without double logging" do
+        logger_spy = instance_spy(StaffActionLogger)
+        allow(StaffActionLogger).to receive(:new).with(Discourse.system_user).and_return(logger_spy)
+
+        settings.set_and_log("log_test", "changed", Discourse.system_user)
+        expect(settings.log_test).to eq("changed")
+        expect(logger_spy).to have_received(:log_site_setting_change).with(
+          :log_test,
+          "initial",
+          "changed",
+          { details: "Updated via Rails console" },
+        ).once
+      end
+    end
+
+    context "for secret settings" do
+      before do
+        settings.setting(:secret_test, "old_secret", secret: true)
+        settings.refresh!
+      end
+
+      it "logs filtered values" do
+        logger_spy = instance_spy(StaffActionLogger)
+        allow(StaffActionLogger).to receive(:new).with(Discourse.system_user).and_return(logger_spy)
+
+        settings.secret_test = "new_secret"
+        expect(settings.secret_test).to eq("new_secret")
+        expect(logger_spy).to have_received(:log_site_setting_change).with(
+          :secret_test,
+          "[FILTERED]",
+          "[FILTERED]",
+          { details: "Updated via Rails console" },
+        ).once
+      end
+    end
+
+    context "for hidden settings" do
+      before do
+        settings.setting(:hidden_test, "old_hidden", hidden: true)
+        settings.refresh!
+      end
+
+      it "does not log the change" do
+        logger_spy = instance_spy(StaffActionLogger)
+        allow(StaffActionLogger).to receive(:new).with(Discourse.system_user).and_return(logger_spy)
+
+        settings.hidden_test = "changed"
+        expect(settings.hidden_test).to eq("changed")
+        expect(logger_spy).not_to have_received(:log_site_setting_change)
+      end
+    end
+
+    context "with plugin modifiers for log details" do
+      before do
+        settings.setting(:plugin_test, "initial")
+        settings.refresh!
+      end
+
+      it "uses the default log details when no plugin modifiers exist" do
+        logger_spy = instance_spy(StaffActionLogger)
+        allow(StaffActionLogger).to receive(:new).with(Discourse.system_user).and_return(logger_spy)
+
+        settings.plugin_test = "changed"
+        expect(settings.plugin_test).to eq("changed")
+        expect(logger_spy).to have_received(:log_site_setting_change).with(
+          :plugin_test,
+          "initial",
+          "changed",
+          { details: "Updated via Rails console" },
+        ).once
+      end
+
+      it "applies plugin modifiers to log details" do
+        # Allow all apply_modifier calls to pass through normally
+        allow(DiscoursePluginRegistry).to receive(:apply_modifier).and_call_original
+
+        # But specifically mock our target call
+        allow(DiscoursePluginRegistry).to receive(:apply_modifier).with(
+          :site_setting_log_details,
+          "Updated via Rails console",
+        ).and_return("Updated via Rails console via test plugin")
+
+        logger_spy = instance_spy(StaffActionLogger)
+        allow(StaffActionLogger).to receive(:new).with(Discourse.system_user).and_return(logger_spy)
+
+        settings.plugin_test = "changed"
+        expect(settings.plugin_test).to eq("changed")
+        expect(logger_spy).to have_received(:log_site_setting_change).with(
+          :plugin_test,
+          "initial",
+          "changed",
+          { details: "Updated via Rails console via test plugin" },
+        ).once
+      end
     end
   end
 end

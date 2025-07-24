@@ -25,18 +25,21 @@ module PageObjects
 
       def open_from_header
         find(".chat-header-icon").click
+        has_css?("html.has-chat")
       end
 
       def close_from_header
         find(".chat-header-icon").click
+        has_no_css?("html.has-chat")
       end
 
       def has_header_href?(href)
         find(".chat-header-icon").has_link?(href: href)
       end
 
-      def open
+      def open(with_preloaded_channels: true)
         visit("/chat")
+        has_finished_loading?(with_preloaded_channels: with_preloaded_channels)
       end
 
       def open_new_message(ensure_open: true)
@@ -52,19 +55,19 @@ module PageObjects
         drawer?(expectation: false, channel_id: channel_id, expanded: expanded)
       end
 
-      def visit_channel(channel, message_id: nil)
+      def visit_channel(channel, message_id: nil, with_preloaded_channels: true, check: true)
         visit(channel.url + (message_id ? "/#{message_id}" : ""))
-        has_finished_loading?
+        has_finished_loading?(with_preloaded_channels: with_preloaded_channels) if check
       end
 
       def visit_user_threads
         visit("/chat/threads")
-        has_no_css?(".spinner")
+        has_css?(".c-user-threads.--loaded")
       end
 
       def visit_thread(thread)
         visit(thread.url)
-        has_css?(".chat-thread:not(.loading)[data-id=\"#{thread.id}\"]")
+        has_css?(".chat-thread.--loaded[data-id=\"#{thread.id}\"]")
       end
 
       def visit_threads_list(channel)
@@ -101,8 +104,13 @@ module PageObjects
         visit("/chat/new-message?recipients=#{recipients}")
       end
 
-      def has_finished_loading?
-        has_no_css?(".chat-channel--not-loaded-once")
+      def has_preloaded_channels?
+        has_css?("body.has-preloaded-chat-channels")
+      end
+
+      def has_finished_loading?(with_preloaded_channels: true)
+        has_preloaded_channels? if with_preloaded_channels
+        has_css?(".--loaded")
         has_no_css?(".chat-skeleton")
       end
 
@@ -122,6 +130,22 @@ module PageObjects
 
       def has_no_new_channel_button?
         has_no_css?(NEW_CHANNEL_BUTTON_SELECTOR)
+      end
+
+      def has_no_messages?
+        have_selector(".empty-state")
+      end
+
+      def has_direct_message_channels_section?
+        has_css?(".direct-message-channels-section")
+      end
+
+      def has_add_member_button?
+        has_css?(".c-channel-members__list-item.-add-member")
+      end
+
+      def has_no_add_member_button?
+        has_no_css?(".c-channel-members__list-item.-add-member")
       end
 
       private

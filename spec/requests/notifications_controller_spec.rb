@@ -32,7 +32,7 @@ RSpec.describe NotificationsController do
   context "when logged in" do
     context "as normal user" do
       fab!(:user) { sign_in(Fabricate(:user)) }
-      fab!(:acting_user) { Fabricate(:user) }
+      fab!(:acting_user, :user)
       fab!(:notification) do
         Fabricate(:notification, user: user, data: { username: acting_user.username }.to_json)
       end
@@ -186,7 +186,7 @@ RSpec.describe NotificationsController do
             )
           end
 
-          fab!(:pending_reviewable) { Fabricate(:reviewable) }
+          fab!(:pending_reviewable, :reviewable)
 
           before { SiteSetting.navigation_menu = "sidebar" }
 
@@ -617,6 +617,35 @@ RSpec.describe NotificationsController do
       it "can't delete notification" do
         delete_notification(403, :to)
       end
+    end
+
+    describe "#totals" do
+      it "can't see notification totals" do
+        get "/notifications/totals.json"
+        expect(response.status).to eq(403)
+      end
+    end
+  end
+
+  context "with user api keys" do
+    fab!(:user)
+    let(:user_api_key) do
+      UserApiKey.create!(
+        scopes: ["notifications"].map { |name| UserApiKeyScope.new(name: name) },
+        user_id: user.id,
+      )
+    end
+
+    before { SiteSetting.user_api_key_allowed_groups = Group::AUTO_GROUPS[:trust_level_0] }
+
+    it "allows access to notifications#totals" do
+      get "/notifications/totals.json", headers: { "User-Api-Key": user_api_key.key }
+      expect(response.status).to eq(200)
+    end
+
+    it "allows access to notifications#index" do
+      get "/notifications.json", headers: { "User-Api-Key": user_api_key.key }
+      expect(response.status).to eq(200)
     end
   end
 end

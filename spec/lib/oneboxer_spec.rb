@@ -215,6 +215,26 @@ RSpec.describe Oneboxer do
         with_tag("span", with: { class: "hashtag-icon-placeholder" })
       end
     end
+
+    it "does not show private subcategory information" do
+      parent_category = Fabricate(:category)
+      private_subcategory =
+        Fabricate(
+          :private_category,
+          parent_category: parent_category,
+          group: Fabricate(:group, name: "superhero"),
+          name: "Private Subcategory",
+        )
+      public_subcategory =
+        Fabricate(:category, parent_category: parent_category, name: "Public Subcategory")
+
+      preview = preview(parent_category.relative_url)
+      expect(preview).not_to include(private_subcategory.name)
+      expect(preview).not_to include(private_subcategory.url)
+
+      expect(preview).to include(public_subcategory.name)
+      expect(preview).to include(public_subcategory.url)
+    end
   end
 
   describe ".onebox_raw" do
@@ -286,10 +306,65 @@ RSpec.describe Oneboxer do
         "<a href='http://test.localhost/g/somegroup#&apos;onerror=&apos;'>http://test.localhost/g/somegroup#&apos;onerror=&apos;</a>",
       )
     end
+
+    context "when URL contains non-ASCII characters" do
+      let(:html) { <<~HTML }
+        <html>
+        <head>
+          <meta property="og:title" content="Cats">
+          <meta property="og:description" content="Meow">
+        </head>
+        <body>
+           <p>body</p>
+        </body>
+        <html>
+      HTML
+
+      context "when response is not a redirect" do
+        let(:url) { "https://its.me/héhé" }
+
+        before do
+          stub_request(:get, url).to_return(status: 200, body: html, headers: {})
+          stub_request(:head, url).to_return(status: 200, body: "", headers: {})
+        end
+
+        it "does not break" do
+          expect(described_class.onebox_raw(url)[:onebox]).to be_present
+        end
+      end
+
+      context "when response is a redirect" do
+        let(:url) { "https://its.me" }
+        let(:non_ascii_url) { "#{url}/h%C3%A9h%C3%A9" }
+
+        before do
+          stub_request(:get, url).to_return(
+            status: 301,
+            body: "",
+            headers: {
+              "location" => non_ascii_url,
+            },
+          )
+          stub_request(:head, url).to_return(
+            status: 301,
+            body: "",
+            headers: {
+              "location" => non_ascii_url,
+            },
+          )
+          stub_request(:get, non_ascii_url).to_return(status: 200, body: html, headers: {})
+          stub_request(:head, non_ascii_url).to_return(status: 200, body: "", headers: {})
+        end
+
+        it "does not break" do
+          expect(described_class.onebox_raw(url)[:onebox]).to be_present
+        end
+      end
+    end
   end
 
   describe ".external_onebox" do
-    html = <<~HTML
+    let(:html) { <<~HTML }
       <html>
       <head>
         <meta property="og:title" content="Cats">
@@ -570,26 +645,57 @@ RSpec.describe Oneboxer do
     end
   end
 
-  it "uses the Onebox custom user agent on specified hosts" do
-    SiteSetting.force_custom_user_agent_hosts = "http://codepen.io|https://video.discourse.org/"
-    url = "https://video.discourse.org/presentation.mp4"
+  describe "onebox custom user agent" do
+    let!(:default_onebox_user_agent) { Discourse.user_agent }
 
-    stub_request(:head, url).to_return(status: 403, body: "", headers: {})
-    stub_request(:get, url).to_return(status: 403, body: "", headers: {})
-    stub_request(:head, url).with(headers: { "User-Agent" => Onebox.options.user_agent }).to_return(
-      status: 200,
-      body: "",
-      headers: {
-      },
-    )
-    stub_request(:get, url).with(headers: { "User-Agent" => Onebox.options.user_agent }).to_return(
-      status: 200,
-      body: "",
-      headers: {
-      },
-    )
+    it "uses the site setting value" do
+      SiteSetting.force_custom_user_agent_hosts = "http://codepen.io|https://video.discourse.org/"
+      url = "https://video.discourse.org/presentation.mp4"
+      custom_user_agent = "Custom User Agent"
 
-    expect(Oneboxer.preview(url, invalidate_oneboxes: true)).to be_present
+      %i[head get].each do |method|
+        stub_request(method, url).with(
+          headers: {
+            "User-Agent" => default_onebox_user_agent,
+          },
+        ).to_return(status: 403, body: "", headers: {})
+        stub_request(method, url).with(
+          headers: {
+            "User-Agent" => "#{custom_user_agent} v#{Discourse::VERSION::STRING}",
+          },
+        ).to_return(status: 200, body: "", headers: {})
+      end
+
+      expect(Oneboxer.preview(url, invalidate_oneboxes: true)).to include("onebox-warning-message")
+
+      SiteSetting.onebox_user_agent = custom_user_agent
+
+      expect(Oneboxer.preview(url, invalidate_oneboxes: true)).to include(
+        "onebox-placeholder-container",
+      )
+    end
+
+    it "forcing on specified hosts" do
+      SiteSetting.force_custom_user_agent_hosts = "http://codepen.io|https://video.discourse.org/"
+      url = "https://video.discourse.org/presentation.mp4"
+
+      stub_request(:head, url).to_return(status: 403, body: "", headers: {})
+      stub_request(:get, url).to_return(status: 403, body: "", headers: {})
+      stub_request(:head, url).with(
+        headers: {
+          "User-Agent" => default_onebox_user_agent,
+        },
+      ).to_return(status: 200, body: "", headers: {})
+      stub_request(:get, url).with(
+        headers: {
+          "User-Agent" => default_onebox_user_agent,
+        },
+      ).to_return(status: 200, body: "", headers: {})
+
+      expect(Oneboxer.preview(url, invalidate_oneboxes: true)).to include(
+        "onebox-placeholder-container",
+      )
+    end
   end
 
   context "with youtube stub" do
@@ -680,7 +786,7 @@ RSpec.describe Oneboxer do
       body: allowlisted_oembed.to_json,
     )
 
-    SiteSetting.allowed_iframes = "discourse.org|https://ifram.es"
+    SiteSetting.allowed_iframes = "https://discourse.org/|https://ifram.es/"
 
     expect(Oneboxer.onebox("https://blocklist.ed/iframes", invalidate_oneboxes: true)).to be_empty
     expect(Oneboxer.onebox("https://allowlist.ed/iframes", invalidate_oneboxes: true)).to match(
@@ -693,17 +799,10 @@ RSpec.describe Oneboxer do
 
     let(:url) { "https://example.com/fake-url/" }
 
-    it "handles a missing description" do
+    it "handles a missing description, title-only oneboxes are fine" do
       stub_request(:get, url).to_return(body: response("missing_description"))
-      expect(Oneboxer.preview(url, invalidate_oneboxes: true)).to include(
+      expect(Oneboxer.preview(url, invalidate_oneboxes: true)).not_to include(
         "could not be found: description",
-      )
-    end
-
-    it "handles a missing description and image" do
-      stub_request(:get, url).to_return(body: response("missing_description_and_image"))
-      expect(Oneboxer.preview(url, invalidate_oneboxes: true)).to include(
-        "could not be found: description, image",
       )
     end
 
@@ -827,16 +926,8 @@ RSpec.describe Oneboxer do
   end
 
   describe "#force_get_hosts" do
-    before do
-      SiteSetting.cache_onebox_response_body_domains = "example.net|example.com|example.org"
-    end
-
     it "includes Amazon sites" do
       expect(Oneboxer.force_get_hosts).to include("https://www.amazon.ca")
-    end
-
-    it "includes cache_onebox_response_body_domains" do
-      expect(Oneboxer.force_get_hosts).to include("https://www.example.com")
     end
   end
 
@@ -889,38 +980,6 @@ RSpec.describe Oneboxer do
 
         expect(Oneboxer.preferred_strategy(hostname)).not_to eq(:default)
       end
-    end
-  end
-
-  describe "cache_onebox_response_body" do
-    let(:html) { <<~HTML }
-        <html>
-        <body>
-           <p>cache me if you can</p>
-        </body>
-        <html>
-      HTML
-
-    let(:url) { "https://www.example.com/my/great/content" }
-    let(:url2) { "https://www.example2.com/my/great/content" }
-
-    before do
-      stub_request(:any, url).to_return(status: 200, body: html)
-      stub_request(:any, url2).to_return(status: 200, body: html)
-
-      SiteSetting.cache_onebox_response_body = true
-      SiteSetting.cache_onebox_response_body_domains = "example.net|example.com|example.org"
-    end
-
-    it "caches when domain matches" do
-      preview = Oneboxer.preview(url, invalidate_oneboxes: true)
-      expect(Oneboxer.cached_response_body_exists?(url)).to eq(true)
-      expect(Oneboxer.fetch_cached_response_body(url)).to eq(html)
-    end
-
-    it "ignores cache when domain not present" do
-      preview = Oneboxer.preview(url2, invalidate_oneboxes: true)
-      expect(Oneboxer.cached_response_body_exists?(url2)).to eq(false)
     end
   end
 

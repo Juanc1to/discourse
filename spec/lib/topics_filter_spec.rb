@@ -5,6 +5,53 @@ RSpec.describe TopicsFilter do
   fab!(:admin)
   fab!(:group)
 
+  describe "#option_info" do
+    let(:options) { TopicsFilter.option_info(Guardian.new) }
+    it "should return a correct hash with name and description keys for all" do
+      expect(options).to be_an(Array)
+      expect(options).to all(be_a(Hash))
+      expect(options).to all(include(:name, :description))
+
+      # 10 is arbitray, but better than just checking for 1
+      expect(options.length).to be > 10
+    end
+
+    it "should include nothing about tags when disabled" do
+      SiteSetting.tagging_enabled = false
+
+      tag_options = options.find { |o| o[:name].include? "tag" }
+      expect(tag_options).to be_nil
+
+      SiteSetting.tagging_enabled = true
+      options = TopicsFilter.option_info(Guardian.new)
+
+      tag_options = options.find { |o| o[:name].include? "tag" }
+      expect(tag_options).not_to be_nil
+    end
+
+    it "should not include user-specific options for anonymous users" do
+      anon_options = TopicsFilter.option_info(Guardian.new)
+      logged_in_options = TopicsFilter.option_info(Guardian.new(user))
+
+      anon_option_names = anon_options.map { |o| o[:name] }.to_set
+      logged_in_option_names = logged_in_options.map { |o| o[:name] }.to_set
+
+      user_specific_options = %w[
+        in:
+        in:pinned
+        in:bookmarked
+        in:watching
+        in:tracking
+        in:muted
+        in:normal
+        in:watching_first_post
+      ]
+
+      user_specific_options.each { |option| expect(anon_option_names).not_to include(option) }
+      user_specific_options.each { |option| expect(logged_in_option_names).to include(option) }
+    end
+  end
+
   describe "#filter_from_query_string" do
     describe "when filtering with multiple filters" do
       fab!(:tag) { Fabricate(:tag, name: "tag1") }
@@ -209,6 +256,43 @@ RSpec.describe TopicsFilter do
             ).to contain_exactly(user_muted_topic.id, user_tracking_topic.id)
           end
         end
+      end
+    end
+
+    describe "when filtering with custom filters" do
+      fab!(:topic)
+      fab!(:word_count_topic) { Fabricate(:topic, word_count: 42) }
+      fab!(:word_count_topic_2) { Fabricate(:topic, word_count: 42) }
+
+      let(:word_count_block) { Proc.new { |scope, value| scope.where(word_count: value) } }
+      let(:id_block) { Proc.new { |scope, value| scope.where(id: value) } }
+      let(:plugin) { Plugin::Instance.new }
+
+      it "supports a custom filter" do
+        plugin.add_filter_custom_filter("word_count", &word_count_block)
+
+        expect(
+          TopicsFilter
+            .new(guardian: Guardian.new)
+            .filter_from_query_string("word_count:42")
+            .pluck(:id),
+        ).to contain_exactly(word_count_topic.id, word_count_topic_2.id)
+      ensure
+        DiscoursePluginRegistry.reset_register!(:custom_filter_mappings)
+      end
+
+      it "supports multiple custom filters" do
+        plugin.add_filter_custom_filter("word_count", &word_count_block)
+        plugin.add_filter_custom_filter("id", &id_block)
+
+        expect(
+          TopicsFilter
+            .new(guardian: Guardian.new)
+            .filter_from_query_string("word_count:42 id:#{word_count_topic.id}")
+            .pluck(:id),
+        ).to contain_exactly(word_count_topic.id)
+      ensure
+        DiscoursePluginRegistry.reset_register!(:custom_filter_mappings)
       end
     end
 
@@ -617,6 +701,20 @@ RSpec.describe TopicsFilter do
       fab!(:closed_topic) { Fabricate(:topic, closed: true) }
       fab!(:archived_topic) { Fabricate(:topic, archived: true) }
       fab!(:deleted_topic_id) { Fabricate(:topic, deleted_at: Time.zone.now).id }
+      fab!(:foobar_topic) { Fabricate(:topic, closed: true, word_count: 42) }
+
+      after { TopicsFilter.custom_status_filters.clear }
+
+      it "supports custom status filters" do
+        TopicsFilter.add_filter_by_status("foobar") { |scope| scope.where("word_count = 42") }
+
+        expect(
+          TopicsFilter
+            .new(guardian: Guardian.new)
+            .filter_from_query_string("status:foobar")
+            .pluck(:id),
+        ).to contain_exactly(foobar_topic.id)
+      end
 
       it "should only return topics that have not been closed or archived when query string is `status:open`" do
         expect(
@@ -642,7 +740,7 @@ RSpec.describe TopicsFilter do
             .new(guardian: Guardian.new)
             .filter_from_query_string("status:deleted")
             .pluck(:id),
-        ).to contain_exactly(topic.id, closed_topic.id, archived_topic.id)
+        ).to contain_exactly(topic.id, closed_topic.id, archived_topic.id, foobar_topic.id)
       end
 
       it "should only return topics that have been archived when query string is `status:archived`" do
@@ -726,7 +824,7 @@ RSpec.describe TopicsFilter do
         )
       end
 
-      fab!(:topic_without_tag) { Fabricate(:topic) }
+      fab!(:topic_without_tag, :topic)
       fab!(:topic_with_tag) { Fabricate(:topic, tags: [tag]) }
       fab!(:topic_with_tag_and_tag2) { Fabricate(:topic, tags: [tag, tag2]) }
       fab!(:topic_with_tag2) { Fabricate(:topic, tags: [tag2]) }
@@ -812,7 +910,7 @@ RSpec.describe TopicsFilter do
       end
 
       it "should only return topics that are tagged with tag1 and tag2 but not tag3 when query string is `tags:tag1 tags:tag2 -tags:tag3`" do
-        topic_with_tag_and_tag2_and_tag3 = Fabricate(:topic, tags: [tag, tag2, tag3])
+        _topic_with_tag_and_tag2_and_tag3 = Fabricate(:topic, tags: [tag, tag2, tag3])
 
         expect(
           TopicsFilter
@@ -913,8 +1011,86 @@ RSpec.describe TopicsFilter do
           ).to contain_exactly(topic_with_tag.id, topic_with_tag_and_tag2.id)
         end
       end
+
+      describe "when query string is `tags:tag_name`" do
+        before { tag.update!(name: "tag_with_underscore") }
+        it "should return topics even when tag contains underscore" do
+          expect(
+            TopicsFilter
+              .new(guardian: Guardian.new)
+              .filter_from_query_string("tags:#{tag.name}")
+              .pluck(:id),
+          ).to contain_exactly(topic_with_tag.id, topic_with_tag_and_tag2.id)
+        end
+      end
     end
 
+    describe "when filtering by tag_groups" do
+      fab!(:tag) { Fabricate(:tag, name: "tag1") }
+      fab!(:tag2) { Fabricate(:tag, name: "tag2") }
+      fab!(:tag3) { Fabricate(:tag, name: "tag3") }
+
+      fab!(:topic_without_tag, :topic)
+      fab!(:topic_with_tag) { Fabricate(:topic, tags: [tag]) }
+      fab!(:topic_with_tag_and_tag2) { Fabricate(:topic, tags: [tag, tag2]) }
+      fab!(:topic_with_tag2) { Fabricate(:topic, tags: [tag2]) }
+
+      fab!(:tag_group) { Fabricate(:tag_group, tag_names: [tag.name, tag2.name]) }
+      fab!(:topic_with_tag3) { Fabricate(:topic, tags: [tag3]) }
+
+      fab!(:staff_only_tag) { Fabricate(:tag, name: "group-only-tag") }
+      fab!(:group)
+      let!(:staff_tag_group) do
+        Fabricate(
+          :tag_group,
+          permissions: {
+            group.name => TagGroupPermission.permission_types[:full],
+          },
+          name: "staff-only-tag-group",
+          tag_names: [staff_only_tag.name],
+        )
+      end
+
+      fab!(:topic_with_staff_only_tag) { Fabricate(:topic, tags: [staff_only_tag]) }
+
+      it "should only return topics that are tagged with any of the specified tag_group when query string is tag_group:tag_group_name" do
+        expect(
+          TopicsFilter
+            .new(guardian: Guardian.new)
+            .filter_from_query_string("tag_group:#{tag_group.name}")
+            .pluck(:id),
+        ).to contain_exactly(topic_with_tag.id, topic_with_tag_and_tag2.id, topic_with_tag2.id)
+      end
+
+      it "should only return topics that are not excluded by the specified tag_group when query string is -tag_group:tag_group_name" do
+        expect(
+          TopicsFilter
+            .new(guardian: Guardian.new)
+            .filter_from_query_string("-tag_group:#{tag_group.name}")
+            .pluck(:id),
+        ).to contain_exactly(topic_with_tag3.id, topic_without_tag.id, topic_with_staff_only_tag.id)
+      end
+
+      it "should return the right topics when query string is `tag_group:staff_tag_group` and user has access to specified tag" do
+        group.add(admin)
+
+        expect(
+          TopicsFilter
+            .new(guardian: Guardian.new(admin))
+            .filter_from_query_string("tag_group:#{staff_tag_group.name}")
+            .pluck(:id),
+        ).to contain_exactly(topic_with_staff_only_tag.id)
+      end
+
+      it "should not return any topics when query string is `tag_group:staff_tag_group` because specified tag is hidden to user" do
+        expect(
+          TopicsFilter
+            .new(guardian: Guardian.new)
+            .filter_from_query_string("tag_group:#{staff_tag_group.name}")
+            .pluck(:id),
+        ).to eq([])
+      end
+    end
     describe "when filtering by topic author" do
       fab!(:user2) { Fabricate(:user, username: "username2") }
       fab!(:topic_by_user) { Fabricate(:topic, user: user) }
@@ -1202,6 +1378,56 @@ RSpec.describe TopicsFilter do
           ).to eq([])
         end
       end
+
+      describe "when query string is `#{filter}-after:1`" do
+        it "should only return topics with #{description} after 1 day ago" do
+          freeze_time do
+            _old_topic = Fabricate(:topic, column => 2.days.ago)
+            recent_topic = Fabricate(:topic, column => Time.zone.now)
+
+            expect(
+              TopicsFilter
+                .new(guardian: Guardian.new)
+                .filter_from_query_string("#{filter}-after:1")
+                .pluck(:id),
+            ).to contain_exactly(recent_topic.id)
+          end
+        end
+      end
+
+      describe "when query string is `#{filter}-before:1`" do
+        it "should only return topics with #{description} before 1 day ago" do
+          freeze_time do
+            old_topic = Fabricate(:topic, column => 2.days.ago)
+            recent_topic = Fabricate(:topic, column => Time.zone.now)
+
+            results =
+              TopicsFilter
+                .new(guardian: Guardian.new)
+                .filter_from_query_string("#{filter}-before:1")
+                .where(id: [old_topic.id, recent_topic.id])
+                .pluck(:id)
+
+            expect(results).to contain_exactly(old_topic.id)
+          end
+        end
+      end
+
+      describe "when query string is `#{filter}-after:0`" do
+        it "should only return topics with #{description} after today" do
+          freeze_time do
+            _old_topic = Fabricate(:topic, column => 2.days.ago)
+            recent_topic = Fabricate(:topic, column => Time.zone.now)
+
+            expect(
+              TopicsFilter
+                .new(guardian: Guardian.new)
+                .filter_from_query_string("#{filter}-after:0")
+                .pluck(:id),
+            ).to contain_exactly(recent_topic.id)
+          end
+        end
+      end
     end
 
     describe "when filtering by activity of topics" do
@@ -1220,6 +1446,13 @@ RSpec.describe TopicsFilter do
     end
 
     describe "ordering topics filter" do
+      before do
+        Plugin::Instance.new.add_filter_custom_filter(
+          "order:wrongly",
+          &->(scope) { scope.order("wrongly") }
+        )
+      end
+
       # Requires the fabrication of `topic`, `topic2` and `topic3` such that the order of the topics is `topic2`, `topic1`, `topic3`
       # when ordered by the given filter in descending order.
       shared_examples "ordering topics filters" do |order, order_description|
@@ -1344,6 +1577,59 @@ RSpec.describe TopicsFilter do
         include_examples "ordering topics filters", "title", "topic's title"
       end
 
+      describe "when ordering by user's last visit to topics" do
+        fab!(:user)
+        fab!(:topic)
+        fab!(:topic2, :topic)
+        fab!(:topic3, :topic)
+
+        before do
+          freeze_time 3.hours.ago do
+            TopicUser.update_last_read(user, topic3.id, 1, 1, 0)
+          end
+
+          freeze_time 2.hours.ago do
+            TopicUser.update_last_read(user, topic.id, 1, 1, 0)
+          end
+
+          freeze_time 1.hour.ago do
+            TopicUser.update_last_read(user, topic2.id, 1, 1, 0)
+          end
+        end
+
+        describe "when query string is `order:read`" do
+          it "should return topics ordered by last visited date in descending order for logged in users" do
+            expect(
+              TopicsFilter
+                .new(guardian: Guardian.new(user))
+                .filter_from_query_string("order:read")
+                .pluck(:id),
+            ).to eq([topic2.id, topic.id, topic3.id])
+          end
+
+          it "should not apply any special ordering for anonymous users" do
+            topics =
+              TopicsFilter
+                .new(guardian: Guardian.new)
+                .filter_from_query_string("order:read")
+                .where(id: [topic.id, topic2.id, topic3.id])
+
+            expect(topics.pluck(:id)).to contain_exactly(topic.id, topic2.id, topic3.id)
+          end
+        end
+
+        describe "when query string is `order:read-asc`" do
+          it "should return topics ordered by last visited date in ascending order for logged in users" do
+            expect(
+              TopicsFilter
+                .new(guardian: Guardian.new(user))
+                .filter_from_query_string("order:read-asc")
+                .pluck(:id),
+            ).to eq([topic3.id, topic.id, topic2.id])
+          end
+        end
+      end
+
       describe "composing multiple order filters" do
         fab!(:topic) { Fabricate(:topic, created_at: Time.zone.local(2023, 1, 1), views: 2) }
         fab!(:topic2) { Fabricate(:topic, created_at: Time.zone.local(2024, 1, 1), views: 2) }
@@ -1370,6 +1656,73 @@ RSpec.describe TopicsFilter do
             ).to eq([topic2.id, topic3.id, topic.id])
           end
         end
+      end
+
+      context "for DiscoursePluginRegistry.custom_filter_mappings" do
+        describe "when extending order:{col}" do
+          fab!(:earlier_topic) { Fabricate(:topic, bumped_at: 2.hours.ago) }
+          fab!(:now_topic) { Fabricate(:topic, bumped_at: Time.now) }
+
+          before_all do
+            Plugin::Instance.new.add_filter_custom_filter(
+              "order:bumped",
+              &->(scope, value, _guardian) { scope.order("bumped_at #{value}") }
+            )
+          end
+
+          it "applies ASC order correctly" do
+            expect(
+              TopicsFilter
+                .new(guardian: Guardian.new)
+                .filter_from_query_string("order:bumped-asc")
+                .pluck(:id),
+            ).to eq([earlier_topic.id, now_topic.id])
+          end
+
+          it "applies default order correctly" do
+            expect(
+              TopicsFilter
+                .new(guardian: Guardian.new)
+                .filter_from_query_string("order:bumped")
+                .pluck(:id),
+            ).to eq([now_topic.id, earlier_topic.id])
+          end
+        end
+      end
+    end
+
+    it "performs AND search for multiple keywords" do
+      SearchIndexer.enable
+      post1 = Fabricate(:post, raw: "keyword1 keyword2")
+      _post2 = Fabricate(:post, raw: "keyword1")
+      _post3 = Fabricate(:post, raw: "keyword2")
+      guardian = Guardian.new(post1.user)
+      filter = TopicsFilter.new(guardian: guardian)
+      scope = filter.filter_from_query_string("keyword1 keyword2")
+      expect(scope.pluck(:id)).to eq([post1.topic_id])
+    end
+
+    describe "with a custom filter" do
+      fab!(:topic)
+
+      before do
+        Plugin::Instance.new.add_filter_custom_filter(
+          "foo",
+          &->(scope, value, guardian) { guardian.is_admin? ? scope : scope.where("1=0") }
+        )
+      end
+
+      it "can guard against the current user" do
+        expect(
+          TopicsFilter.new(guardian: Guardian.new).filter_from_query_string("foo:bar").pluck(:id),
+        ).to be_empty
+
+        expect(
+          TopicsFilter
+            .new(guardian: Guardian.new(admin))
+            .filter_from_query_string("foo:bar")
+            .pluck(:id),
+        ).to contain_exactly(topic.id)
       end
     end
   end

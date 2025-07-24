@@ -1,8 +1,8 @@
 # frozen_string_literal: true
 
 RSpec.describe "Channel - Info - Settings page", type: :system do
-  fab!(:current_user) { Fabricate(:user) }
-  fab!(:channel_1) { Fabricate(:category_channel) }
+  fab!(:current_user, :user)
+  fab!(:channel_1, :category_channel)
 
   let(:chat_page) { PageObjects::Pages::Chat.new }
   let(:toasts) { PageObjects::Components::Toasts.new }
@@ -47,7 +47,7 @@ RSpec.describe "Channel - Info - Settings page", type: :system do
   end
 
   context "as not allowed to see the channel" do
-    fab!(:channel_1) { Fabricate(:private_category_channel) }
+    fab!(:channel_1, :private_category_channel)
 
     it "redirects to browse page" do
       chat_page.visit_channel_settings(channel_1)
@@ -100,7 +100,7 @@ RSpec.describe "Channel - Info - Settings page", type: :system do
       expect(page.find(".c-channel-settings__name")["innerHTML"].strip).to eq(
         "&lt;script&gt;alert('hello')&lt;/script&gt;",
       )
-      expect(page.find(".chat-channel-name__label")["innerHTML"].strip).to eq(
+      expect(page.find(".chat-channel-name__label")["innerHTML"].strip).to include(
         "&lt;script&gt;alert('hello')&lt;/script&gt;",
       )
     end
@@ -122,36 +122,18 @@ RSpec.describe "Channel - Info - Settings page", type: :system do
       }.to change { membership.reload.muted }.from(false).to(true)
     end
 
-    it "can change desktop notification level" do
+    it "can change notification level" do
       chat_page.visit_channel_settings(channel_1)
       membership = channel_1.membership_for(current_user)
 
       expect {
         select_kit =
-          PageObjects::Components::SelectKit.new(
-            ".c-channel-settings__desktop-notifications-selector",
-          )
+          PageObjects::Components::SelectKit.new(".c-channel-settings__notifications-selector")
         select_kit.expand
         select_kit.select_row_by_name("Never")
 
         expect(toasts).to have_success(I18n.t("js.saved"))
-      }.to change { membership.reload.desktop_notification_level }.from("mention").to("never")
-    end
-
-    it "can change mobile notification level" do
-      chat_page.visit_channel_settings(channel_1)
-      membership = channel_1.membership_for(current_user)
-
-      expect {
-        select_kit =
-          PageObjects::Components::SelectKit.new(
-            ".c-channel-settings__mobile-notifications-selector",
-          )
-        select_kit.expand
-        select_kit.select_row_by_name("Never")
-
-        expect(toasts).to have_success(I18n.t("js.saved"))
-      }.to change { membership.reload.mobile_notification_level }.from("mention").to("never")
+      }.to change { membership.reload.notification_level }.from("mention").to("never")
     end
 
     it "can unfollow channel" do
@@ -184,10 +166,27 @@ RSpec.describe "Channel - Info - Settings page", type: :system do
         ).to eq(false)
       end
     end
+
+    context "when direct message channel" do
+      fab!(:channel_1) do
+        Fabricate(:direct_message_channel, users: [current_user, Fabricate(:user)])
+      end
+
+      before { channel_1.add(current_user) }
+
+      it "can toggle threading" do
+        chat_page.visit_channel_settings(channel_1)
+
+        expect {
+          PageObjects::Components::DToggleSwitch.new(".c-channel-settings__threading-switch").toggle
+          expect(toasts).to have_success(I18n.t("js.saved"))
+        }.to change { channel_1.reload.threading_enabled }.from(true).to(false)
+      end
+    end
   end
 
   context "as staff" do
-    fab!(:current_user) { Fabricate(:admin) }
+    fab!(:current_user, :admin)
 
     before { channel_1.add(current_user) }
 

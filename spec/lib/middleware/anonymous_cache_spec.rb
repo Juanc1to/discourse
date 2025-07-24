@@ -112,6 +112,26 @@ RSpec.describe Middleware::AnonymousCache do
       expect(key1).not_to eq(key2)
     end
 
+    it "handles user agents with invalid bytes" do
+      agent = (+"Evil Googlebot String \xc3\x28").force_encoding("ASCII")
+      expect {
+        key1 = new_helper("HTTP_USER_AGENT" => agent).cache_key
+        key2 =
+          new_helper(
+            "HTTP_USER_AGENT" => agent.encode("utf-8", invalid: :replace, undef: :replace),
+          ).cache_key
+        expect(key1).to eq(key2)
+      }.not_to raise_error
+    end
+
+    it "handles showing original content" do
+      show_orig_key =
+        new_helper("HTTP_COOKIE" => ContentLocalization::SHOW_ORIGINAL_COOKIE).cache_key
+      regular_key = new_helper.cache_key
+
+      expect(show_orig_key).not_to eq(regular_key)
+    end
+
     context "when cached" do
       let!(:helper) { new_helper("ANON_CACHE_DURATION" => 10) }
 
@@ -155,6 +175,45 @@ RSpec.describe Middleware::AnonymousCache do
 
         helper = new_helper("ANON_CACHE_DURATION" => 10, "HTTP_ACCEPT_ENCODING" => "gz, br")
         expect(helper.cached).to eq(nil)
+      end
+
+      it "includes the forced color mode in the cache key" do
+        dark_helper =
+          new_helper("ANON_CACHE_DURATION" => 10, "HTTP_COOKIE" => "forced_color_mode=dark")
+        dark_helper.cache([200, { "HELLO" => "WORLD" }, ["dark mode"]])
+
+        light_helper =
+          new_helper("ANON_CACHE_DURATION" => 10, "HTTP_COOKIE" => "forced_color_mode=light")
+        expect(light_helper.cached).to eq(nil)
+
+        light_helper.cache([200, { "HELLO" => "WORLD" }, ["light mode"]])
+
+        auto_helper = new_helper("ANON_CACHE_DURATION" => 10)
+        expect(auto_helper.cached).to eq(nil)
+
+        auto_helper.cache([200, { "HELLO" => "WORLD" }, ["auto color mode"]])
+
+        unknown_helper =
+          new_helper("ANON_CACHE_DURATION" => 10, "HTTP_COOKIE" => "forced_color_mode=blada")
+        expect(unknown_helper.cached).to eq(
+          [200, { "HELLO" => "WORLD", "X-Discourse-Cached" => "true" }, ["auto color mode"]],
+        )
+
+        dark_helper =
+          new_helper("ANON_CACHE_DURATION" => 10, "HTTP_COOKIE" => "forced_color_mode=dark")
+        light_helper =
+          new_helper("ANON_CACHE_DURATION" => 10, "HTTP_COOKIE" => "forced_color_mode=light")
+        auto_helper = new_helper("ANON_CACHE_DURATION" => 10)
+
+        expect(dark_helper.cached).to eq(
+          [200, { "HELLO" => "WORLD", "X-Discourse-Cached" => "true" }, ["dark mode"]],
+        )
+        expect(light_helper.cached).to eq(
+          [200, { "HELLO" => "WORLD", "X-Discourse-Cached" => "true" }, ["light mode"]],
+        )
+        expect(auto_helper.cached).to eq(
+          [200, { "HELLO" => "WORLD", "X-Discourse-Cached" => "true" }, ["auto color mode"]],
+        )
       end
 
       it "returns cached data for cached requests" do
@@ -217,8 +276,6 @@ RSpec.describe Middleware::AnonymousCache do
 
   describe "#force_anonymous!" do
     before { RateLimiter.enable }
-
-    use_redis_snapshotting
 
     it "will revert to anonymous once we reach the limit" do
       is_anon = false
@@ -350,6 +407,15 @@ RSpec.describe Middleware::AnonymousCache do
       get "/", headers: { "HTTP_USER_AGENT" => "Googlebot/2.1 (+http://www.google.com/bot.html)" }
 
       expect(@status).to eq(403)
+
+      expect {
+        get "/",
+            headers: {
+              "HTTP_USER_AGENT" => (+"Evil Googlebot String \xc3\x28").force_encoding("ASCII"),
+            }
+
+        expect(@status).to eq(403)
+      }.not_to raise_error
 
       get "/",
           headers: {

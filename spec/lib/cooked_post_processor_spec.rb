@@ -185,11 +185,9 @@ RSpec.describe CookedPostProcessor do
              - #{url_with_query_param}
           RAW
 
-        let(:staff_post) do
-          Fabricate(:post, user: Fabricate(:admin, refresh_auto_groups: true), raw: <<~RAW)
+        let(:staff_post) { Fabricate(:post, user: Fabricate(:admin), raw: <<~RAW) }
           This is a #{url_with_path} topic
           RAW
-        end
 
         before do
           urls.each do |url|
@@ -403,6 +401,40 @@ RSpec.describe CookedPostProcessor do
         end
       end
 
+      context "with small images" do
+        fab!(:upload) { Fabricate(:image_upload, width: 150, height: 150) }
+        fab!(:post) { Fabricate(:post, user: user_with_auto_groups, raw: <<~HTML) }
+          <img src="#{upload.url}">
+          HTML
+        let(:cpp) { CookedPostProcessor.new(post, disable_dominant_color: true) }
+
+        before { SiteSetting.create_thumbnails = true }
+
+        it "shows the lightbox when both dimensions are above the minimum" do
+          cpp.post_process
+          expect(cpp.html).to match(/<div class="lightbox-wrapper">/)
+        end
+
+        it "does not show lightbox when both dimensions are below the minimum" do
+          upload.update!(width: 50, height: 50)
+          cpp.post_process
+
+          expect(cpp.html).not_to match(/<div class="lightbox-wrapper">/)
+        end
+
+        it "does not show lightbox when either dimension is below the minimum" do
+          upload.update!(width: 50, height: 150)
+          cpp.post_process
+
+          expect(cpp.html).not_to match(/<div class="lightbox-wrapper">/)
+        end
+
+        it "does not create thumbnails for small images" do
+          Upload.any_instance.expects(:create_thumbnail!).never
+          cpp.post_process
+        end
+      end
+
       context "with large images" do
         fab!(:upload) { Fabricate(:image_upload, width: 1750, height: 2000) }
 
@@ -421,7 +453,7 @@ RSpec.describe CookedPostProcessor do
           cpp.post_process
 
           expect(cpp.html).to match_html <<~HTML
-            <p><div class="lightbox-wrapper"><a class="lightbox" href="//test.localhost#{upload.url}" data-download-href="//test.localhost/#{upload_path}/#{upload.sha1}" title="logo.png"><img src="//test.localhost/#{upload_path}/optimized/1X/#{upload.sha1}_#{OptimizedImage::VERSION}_690x788.png" width="690" height="788"><div class="meta"><svg class="fa d-icon d-icon-far-image svg-icon" aria-hidden="true"><use href="#far-image"></use></svg><span class="filename">logo.png</span><span class="informations">1750×2000 1.21 KB</span><svg class="fa d-icon d-icon-discourse-expand svg-icon" aria-hidden="true"><use href="#discourse-expand"></use></svg></div></a></div></p>
+            <p><div class="lightbox-wrapper"><a class="lightbox" href="//test.localhost#{upload.url}" data-download-href="//test.localhost/#{upload_path}/#{upload.sha1}" title="logo.png"><img src="//test.localhost#{upload.thumbnail(690, 788).url}" width="690" height="788"><div class="meta"><svg class="fa d-icon d-icon-far-image svg-icon" aria-hidden="true"><use href="#far-image"></use></svg><span class="filename">logo.png</span><span class="informations">1750×2000 1.21 KB</span><svg class="fa d-icon d-icon-discourse-expand svg-icon" aria-hidden="true"><use href="#discourse-expand"></use></svg></div></a></div></p>
           HTML
 
           expect(cpp).to be_dirty
@@ -655,7 +687,7 @@ RSpec.describe CookedPostProcessor do
           cpp.post_process
 
           expect(cpp.html).to match_html <<~HTML
-            <p><div class="lightbox-wrapper"><a class="lightbox" href="//test.localhost#{upload.url}" data-download-href="//test.localhost/#{upload_path}/#{upload.sha1}" title="logo.png"><img src="//test.localhost/#{upload_path}/optimized/1X/#{upload.sha1}_#{OptimizedImage::VERSION}_230x500.png" width="230" height="500"><div class="meta"><svg class="fa d-icon d-icon-far-image svg-icon" aria-hidden="true"><use href="#far-image"></use></svg><span class="filename">logo.png</span><span class="informations">1125×2436 1.21 KB</span><svg class="fa d-icon d-icon-discourse-expand svg-icon" aria-hidden="true"><use href="#discourse-expand"></use></svg></div></a></div></p>
+            <p><div class="lightbox-wrapper"><a class="lightbox" href="//test.localhost#{upload.url}" data-download-href="//test.localhost/#{upload_path}/#{upload.sha1}" title="logo.png"><img src="//test.localhost#{upload.thumbnail(230, 500).url}" width="230" height="500"><div class="meta"><svg class="fa d-icon d-icon-far-image svg-icon" aria-hidden="true"><use href="#far-image"></use></svg><span class="filename">logo.png</span><span class="informations">1125×2436 1.21 KB</span><svg class="fa d-icon d-icon-discourse-expand svg-icon" aria-hidden="true"><use href="#discourse-expand"></use></svg></div></a></div></p>
           HTML
 
           expect(cpp).to be_dirty
@@ -686,7 +718,7 @@ RSpec.describe CookedPostProcessor do
           cpp.post_process
 
           expect(cpp.html).to match_html <<~HTML
-            <p><div class="lightbox-wrapper"><a class="lightbox" href="//test.localhost/subfolder#{upload.url}" data-download-href="//test.localhost/subfolder/#{upload_path}/#{upload.sha1}" title="logo.png"><img src="//test.localhost/subfolder/#{upload_path}/optimized/1X/#{upload.sha1}_#{OptimizedImage::VERSION}_690x788.png" width="690" height="788"><div class="meta"><svg class="fa d-icon d-icon-far-image svg-icon" aria-hidden="true"><use href="#far-image"></use></svg><span class="filename">logo.png</span><span class="informations">1750×2000 1.21 KB</span><svg class="fa d-icon d-icon-discourse-expand svg-icon" aria-hidden="true"><use href="#discourse-expand"></use></svg></div></a></div></p>
+            <p><div class="lightbox-wrapper"><a class="lightbox" href="//test.localhost/subfolder#{upload.url}" data-download-href="//test.localhost/subfolder/#{upload_path}/#{upload.sha1}" title="logo.png"><img src="//test.localhost#{upload.thumbnail(690, 788).url}" width="690" height="788"><div class="meta"><svg class="fa d-icon d-icon-far-image svg-icon" aria-hidden="true"><use href="#far-image"></use></svg><span class="filename">logo.png</span><span class="informations">1750×2000 1.21 KB</span><svg class="fa d-icon d-icon-discourse-expand svg-icon" aria-hidden="true"><use href="#discourse-expand"></use></svg></div></a></div></p>
           HTML
 
           expect(cpp).to be_dirty
@@ -697,7 +729,7 @@ RSpec.describe CookedPostProcessor do
           cpp.post_process
 
           expect(cpp.html).to match_html <<~HTML
-            <p><div class="lightbox-wrapper"><a class="lightbox" href="//test.localhost/subfolder#{upload.url}" data-download-href="//test.localhost/subfolder/#{upload_path}/#{upload.sha1}" title="><img src=x onerror=alert('haha')>.png"><img src="//test.localhost/subfolder/#{upload_path}/optimized/1X/#{upload.sha1}_#{OptimizedImage::VERSION}_690x788.png" width="690" height="788"><div class="meta"><svg class="fa d-icon d-icon-far-image svg-icon" aria-hidden="true"><use href="#far-image"></use></svg><span class="filename">&gt;&lt;img src=x onerror=alert('haha')&gt;.png</span><span class="informations">1750×2000 1.21 KB</span><svg class="fa d-icon d-icon-discourse-expand svg-icon" aria-hidden="true"><use href="#discourse-expand"></use></svg></div></a></div></p>
+            <p><div class="lightbox-wrapper"><a class="lightbox" href="//test.localhost/subfolder#{upload.url}" data-download-href="//test.localhost/subfolder/#{upload_path}/#{upload.sha1}" title="><img src=x onerror=alert('haha')>.png"><img src="//test.localhost#{upload.thumbnail(690, 788).url}" width="690" height="788"><div class="meta"><svg class="fa d-icon d-icon-far-image svg-icon" aria-hidden="true"><use href="#far-image"></use></svg><span class="filename">&gt;&lt;img src=x onerror=alert('haha')&gt;.png</span><span class="informations">1750×2000 1.21 KB</span><svg class="fa d-icon d-icon-discourse-expand svg-icon" aria-hidden="true"><use href="#discourse-expand"></use></svg></div></a></div></p>
           HTML
         end
       end
@@ -720,7 +752,7 @@ RSpec.describe CookedPostProcessor do
           cpp.post_process
 
           expect(cpp.html).to match_html <<~HTML
-            <p><div class="lightbox-wrapper"><a class="lightbox" href="//test.localhost#{upload.url}" data-download-href="//test.localhost/#{upload_path}/#{upload.sha1}" title="WAT"><img src="//test.localhost/#{upload_path}/optimized/1X/#{upload.sha1}_#{OptimizedImage::VERSION}_690x788.png" title="WAT" alt="RED" width="690" height="788"><div class="meta"><svg class="fa d-icon d-icon-far-image svg-icon" aria-hidden="true"><use href="#far-image"></use></svg><span class="filename">WAT</span><span class="informations">1750×2000 1.21 KB</span><svg class="fa d-icon d-icon-discourse-expand svg-icon" aria-hidden="true"><use href="#discourse-expand"></use></svg></div></a></div></p>
+            <p><div class="lightbox-wrapper"><a class="lightbox" href="//test.localhost#{upload.url}" data-download-href="//test.localhost/#{upload_path}/#{upload.sha1}" title="WAT"><img src="//test.localhost#{upload.thumbnail(690, 788).url}" title="WAT" alt="RED" width="690" height="788"><div class="meta"><svg class="fa d-icon d-icon-far-image svg-icon" aria-hidden="true"><use href="#far-image"></use></svg><span class="filename">WAT</span><span class="informations">1750×2000 1.21 KB</span><svg class="fa d-icon d-icon-discourse-expand svg-icon" aria-hidden="true"><use href="#discourse-expand"></use></svg></div></a></div></p>
           HTML
 
           expect(cpp).to be_dirty
@@ -745,7 +777,7 @@ RSpec.describe CookedPostProcessor do
           cpp.post_process
 
           expect(cpp.html).to match_html <<~HTML
-            <p><div class="lightbox-wrapper"><a class="lightbox" href="//test.localhost#{upload.url}" data-download-href="//test.localhost/#{upload_path}/#{upload.sha1}" title="WAT"><img src="//test.localhost/#{upload_path}/optimized/1X/#{upload.sha1}_#{OptimizedImage::VERSION}_690x788.png" title="WAT" width="690" height="788"><div class="meta"><svg class="fa d-icon d-icon-far-image svg-icon" aria-hidden="true"><use href="#far-image"></use></svg><span class="filename">WAT</span><span class="informations">1750×2000 1.21 KB</span><svg class="fa d-icon d-icon-discourse-expand svg-icon" aria-hidden="true"><use href="#discourse-expand"></use></svg></div></a></div></p>
+            <p><div class="lightbox-wrapper"><a class="lightbox" href="//test.localhost#{upload.url}" data-download-href="//test.localhost/#{upload_path}/#{upload.sha1}" title="WAT"><img src="//test.localhost#{upload.thumbnail(690, 788).url}" title="WAT" width="690" height="788"><div class="meta"><svg class="fa d-icon d-icon-far-image svg-icon" aria-hidden="true"><use href="#far-image"></use></svg><span class="filename">WAT</span><span class="informations">1750×2000 1.21 KB</span><svg class="fa d-icon d-icon-discourse-expand svg-icon" aria-hidden="true"><use href="#discourse-expand"></use></svg></div></a></div></p>
           HTML
 
           expect(cpp).to be_dirty
@@ -770,7 +802,7 @@ RSpec.describe CookedPostProcessor do
           cpp.post_process
 
           expect(cpp.html).to match_html <<~HTML
-            <p><div class="lightbox-wrapper"><a class="lightbox" href="//test.localhost#{upload.url}" data-download-href="//test.localhost/#{upload_path}/#{upload.sha1}" title="RED"><img src="//test.localhost/#{upload_path}/optimized/1X/#{upload.sha1}_#{OptimizedImage::VERSION}_690x788.png" alt="RED" width="690" height="788"><div class="meta"><svg class="fa d-icon d-icon-far-image svg-icon" aria-hidden="true"><use href="#far-image"></use></svg><span class="filename">RED</span><span class="informations">1750×2000 1.21 KB</span><svg class="fa d-icon d-icon-discourse-expand svg-icon" aria-hidden="true"><use href="#discourse-expand"></use></svg></div></a></div></p>
+            <p><div class="lightbox-wrapper"><a class="lightbox" href="//test.localhost#{upload.url}" data-download-href="//test.localhost/#{upload_path}/#{upload.sha1}" title="RED"><img src="//test.localhost#{upload.thumbnail(690, 788).url}" alt="RED" width="690" height="788"><div class="meta"><svg class="fa d-icon d-icon-far-image svg-icon" aria-hidden="true"><use href="#far-image"></use></svg><span class="filename">RED</span><span class="informations">1750×2000 1.21 KB</span><svg class="fa d-icon d-icon-discourse-expand svg-icon" aria-hidden="true"><use href="#discourse-expand"></use></svg></div></a></div></p>
           HTML
 
           expect(cpp).to be_dirty
@@ -1162,7 +1194,7 @@ RSpec.describe CookedPostProcessor do
         Oneboxer.unstub(:onebox)
       end
 
-      context "when the post is with_secure_uploads and the upload is secure and secure uploads is enabled" do
+      context "when the post is should_secure_uploads and the upload is secure and secure uploads is enabled" do
         before do
           setup_s3
           upload.update(secure: true)
@@ -1633,7 +1665,7 @@ RSpec.describe CookedPostProcessor do
         end
 
         context "with media uploads" do
-          fab!(:image_upload) { Fabricate(:upload) }
+          fab!(:image_upload, :upload)
           fab!(:audio_upload) { Fabricate(:upload, extension: "ogg") }
           fab!(:video_upload) { Fabricate(:upload, extension: "mov") }
 
@@ -1908,13 +1940,12 @@ RSpec.describe CookedPostProcessor do
     end
 
     context "with an unmodified quote" do
-      let(:cp) do
-        Fabricate(
-          :post,
-          raw:
-            "[quote=\"#{pp.user.username}, post: #{pp.post_number}, topic:#{pp.topic_id}]\nripe for quoting\n[/quote]\ntest",
-        )
-      end
+      let(:cp) { Fabricate(:post, raw: <<~MARKDOWN) }
+        [quote="#{pp.user.username}, post: #{pp.post_number}, topic:#{pp.topic_id}"]
+        ripe for quoting
+        [/quote]
+        test
+      MARKDOWN
 
       it "should not be marked as modified" do
         cpp.post_process_quotes
@@ -1923,13 +1954,12 @@ RSpec.describe CookedPostProcessor do
     end
 
     context "with a modified quote" do
-      let(:cp) do
-        Fabricate(
-          :post,
-          raw:
-            "[quote=\"#{pp.user.username}, post: #{pp.post_number}, topic:#{pp.topic_id}]\nmodified\n[/quote]\ntest",
-        )
-      end
+      let(:cp) { Fabricate(:post, raw: <<~MARKDOWN) }
+        [quote="#{pp.user.username}, post: #{pp.post_number}, topic:#{pp.topic_id}"]
+        modified
+        [/quote]
+        test
+      MARKDOWN
 
       it "should be marked as modified" do
         cpp.post_process_quotes
@@ -1938,13 +1968,12 @@ RSpec.describe CookedPostProcessor do
     end
 
     context "with external discourse instance quote" do
-      let(:external_raw) { <<~RAW.strip }
+      let(:cp) { Fabricate(:post, user: user_with_auto_groups, raw: <<~MARKDOWN.strip) }
         [quote="random_guy_not_from_our_discourse, post:2004, topic:401"]
         this quote is not from our discourse
         [/quote]
         and this is a reply
-        RAW
-      let(:cp) { Fabricate(:post, user: user_with_auto_groups, raw: external_raw) }
+      MARKDOWN
 
       it "it should be marked as missing" do
         cpp.post_process_quotes

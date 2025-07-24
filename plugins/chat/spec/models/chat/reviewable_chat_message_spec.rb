@@ -1,7 +1,5 @@
 # frozen_string_literal: true
 
-require "rails_helper"
-
 RSpec.describe Chat::ReviewableMessage, type: :model do
   fab!(:moderator)
   fab!(:user)
@@ -19,6 +17,13 @@ RSpec.describe Chat::ReviewableMessage, type: :model do
 
     expect(reviewable).to be_approved
     expect(chat_message.reload.deleted_at).not_to be_present
+  end
+
+  it "agree_and_keep_deleted agrees with the flag and keeps the message deleted" do
+    chat_message.trash!(user)
+    reviewable.perform(moderator, :agree_and_keep_deleted)
+    expect(reviewable).to be_approved
+    expect(chat_message.reload.deleted_at).to be_present
   end
 
   it "agree_and_delete agrees with the flag and deletes the message" do

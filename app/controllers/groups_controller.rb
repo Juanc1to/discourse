@@ -111,7 +111,7 @@ class GroupsController < ApplicationController
 
   def show
     respond_to do |format|
-      group = find_group(:id)
+      group = find_group_for_show
 
       format.html do
         @title = group.full_name.present? ? group.full_name.capitalize : group.name
@@ -179,7 +179,6 @@ class GroupsController < ApplicationController
       if params[:update_existing_users] == "true"
         update_existing_users(group.group_users, notification_level, categories, tags)
       end
-      AdminDashboardData.clear_found_problem("group_#{group.id}_email_credentials")
 
       # Redirect user to groups index page if they can no longer see the group
       return redirect_with_client_support groups_path if !guardian.can_see?(group)
@@ -191,16 +190,25 @@ class GroupsController < ApplicationController
   end
 
   def posts
-    group = find_group(:group_id)
+    group = find_group(:name)
     guardian.ensure_can_see_group_members!(group)
 
     posts =
       group.posts_for(guardian, params.permit(:before_post_id, :before, :category_id)).limit(20)
-    render_serialized posts.to_a, GroupPostSerializer
+
+    response = { posts: serialize_data(posts, GroupPostSerializer) }
+
+    if guardian.can_lazy_load_categories?
+      category_ids = posts.map { |p| p.topic.category_id }.compact.uniq
+      categories = Category.secured(guardian).with_parents(category_ids)
+      response[:categories] = serialize_data(categories, CategoryBadgeSerializer)
+    end
+
+    render json: response
   end
 
   def posts_feed
-    group = find_group(:group_id)
+    group = find_group(:name)
     guardian.ensure_can_see_group_members!(group)
 
     @posts =
@@ -209,26 +217,49 @@ class GroupsController < ApplicationController
       "#{SiteSetting.title} - #{I18n.t("rss_description.group_posts", group_name: group.name)}"
     @link = Discourse.base_url
     @description = I18n.t("rss_description.group_posts", group_name: group.name)
+
     render "posts/latest", formats: [:rss]
   end
 
   def mentions
     raise Discourse::NotFound unless SiteSetting.enable_mentions?
-    group = find_group(:group_id)
+
+    group = find_group(:name)
+    guardian.ensure_can_see_group_members!(group)
+
     posts =
-      group.mentioned_posts_for(guardian, params.permit(:before_post_id, :category_id)).limit(20)
-    render_serialized posts.to_a, GroupPostSerializer
+      group.mentioned_posts_for(
+        guardian,
+        params.permit(:before_post_id, :before, :category_id),
+      ).limit(20)
+
+    response = { posts: serialize_data(posts, GroupPostSerializer) }
+
+    if guardian.can_lazy_load_categories?
+      category_ids = posts.map { |p| p.topic.category_id }.compact.uniq
+      categories = Category.secured(guardian).with_parents(category_ids)
+      response[:categories] = serialize_data(categories, CategoryBadgeSerializer)
+    end
+
+    render json: response
   end
 
   def mentions_feed
     raise Discourse::NotFound unless SiteSetting.enable_mentions?
-    group = find_group(:group_id)
+
+    group = find_group(:name)
+    guardian.ensure_can_see_group_members!(group)
+
     @posts =
-      group.mentioned_posts_for(guardian, params.permit(:before_post_id, :category_id)).limit(50)
+      group.mentioned_posts_for(
+        guardian,
+        params.permit(:before_post_id, :before, :category_id),
+      ).limit(50)
     @title =
       "#{SiteSetting.title} - #{I18n.t("rss_description.group_mentions", group_name: group.name)}"
     @link = Discourse.base_url
     @description = I18n.t("rss_description.group_mentions", group_name: group.name)
+
     render "posts/latest", formats: [:rss]
   end
 
@@ -236,7 +267,7 @@ class GroupsController < ApplicationController
   MEMBERS_DEFAULT_PAGE_SIZE = 50
 
   def members
-    group = find_group(:group_id)
+    group = find_group(:name)
 
     guardian.ensure_can_see_group_members!(group)
 
@@ -382,7 +413,12 @@ class GroupsController < ApplicationController
 
       emails.each do |email|
         begin
-          Invite.generate(current_user, email: email, group_ids: [group.id])
+          Invite.generate(
+            current_user,
+            email: email,
+            group_ids: [group.id],
+            skip_email: params[:skip_email].to_s == "true",
+          )
         rescue RateLimiter::LimitExceeded => e
           return(
             render_json_error(
@@ -448,6 +484,19 @@ class GroupsController < ApplicationController
     user = User.find_by(id: params[:user_id])
     raise Discourse::InvalidParameters.new(:user_id) if user.blank?
 
+    # find original membership request PM
+    request_topic =
+      Topic.find_by(
+        title:
+          I18n.t(
+            "groups.request_membership_pm.title",
+            group_name: group.name,
+            locale: user.effective_locale,
+          ),
+        archetype: Archetype.private_message,
+        user_id: user.id,
+      )
+
     ActiveRecord::Base.transaction do
       if params[:accept]
         group.add(user)
@@ -460,9 +509,15 @@ class GroupsController < ApplicationController
     if params[:accept]
       PostCreator.new(
         current_user,
-        title: I18n.t("groups.request_accepted_pm.title", group_name: group.name),
-        raw: I18n.t("groups.request_accepted_pm.body", group_name: group.name),
-        archetype: Archetype.private_message,
+        post_type: Post.types[:regular],
+        topic_id: request_topic.id,
+        raw:
+          I18n.t(
+            "groups.request_accepted_pm.body",
+            group_name: group.name,
+            locale: user.effective_locale,
+          ),
+        reply_to_post_number: 1,
         target_usernames: user.username,
         skip_validations: true,
       ).create!
@@ -472,7 +527,7 @@ class GroupsController < ApplicationController
   end
 
   def mentionable
-    group = find_group(:group_id, ensure_can_see: false)
+    group = find_group(:name, ensure_can_see: false)
 
     if group
       render json: { mentionable: Group.mentionable(current_user).where(id: group.id).present? }
@@ -482,7 +537,7 @@ class GroupsController < ApplicationController
   end
 
   def messageable
-    group = find_group(:group_id, ensure_can_see: false)
+    group = find_group(:name, ensure_can_see: false)
 
     if group
       render json: { messageable: guardian.can_send_private_message?(group) }
@@ -545,12 +600,12 @@ class GroupsController < ApplicationController
     end
   end
 
-  MAX_NOTIFIED_OWNERS ||= 20
+  MAX_NOTIFIED_OWNERS = 20
 
   def request_membership
     params.require(:reason)
 
-    group = find_group(:id)
+    group = find_group(:name)
 
     begin
       GroupRequest.create!(group: group, user: current_user, reason: params[:reason])
@@ -589,7 +644,7 @@ class GroupsController < ApplicationController
   end
 
   def set_notifications
-    group = find_group(:id)
+    group = find_group(:name)
     notification_level = params.require(:notification_level)
 
     user_id = current_user.id
@@ -604,7 +659,7 @@ class GroupsController < ApplicationController
   end
 
   def histories
-    group = find_group(:group_id)
+    group = find_group(:name)
     guardian.ensure_can_edit!(group) unless guardian.can_admin_group?(group)
 
     page_size = 25
@@ -620,16 +675,19 @@ class GroupsController < ApplicationController
   end
 
   def search
+    include_everyone = params[:include_everyone] == "true"
+    order = ["name"]
     groups =
-      Group
-        .visible_groups(current_user)
-        .where("groups.id <> ?", Group::AUTO_GROUPS[:everyone])
-        .includes(:flair_upload)
-        .order(:name)
+      Group.visible_groups(current_user, order, include_everyone: include_everyone).includes(
+        :flair_upload,
+      )
 
     if (term = params[:term]).present?
       groups =
-        groups.where("groups.name ILIKE :term OR groups.full_name ILIKE :term", term: "%#{term}%")
+        groups.where(
+          "position(LOWER(:term) IN LOWER(groups.name)) <> 0 OR position(LOWER(:term) IN LOWER(groups.full_name)) <> 0",
+          term: term,
+        )
     end
 
     groups = groups.where(automatic: false) if params[:ignore_automatic].to_s == "true"
@@ -643,7 +701,7 @@ class GroupsController < ApplicationController
   end
 
   def permissions
-    group = find_group(:id)
+    group = find_group(:name)
     category_groups =
       group.category_groups.select do |category_group|
         guardian.can_see_category?(category_group.category)
@@ -661,15 +719,13 @@ class GroupsController < ApplicationController
     params.require(:host)
     params.require(:username)
     params.require(:password)
-    params.require(:ssl)
 
     group = Group.find(params[:group_id])
     guardian.ensure_can_edit!(group)
 
     RateLimiter.new(current_user, "group_test_email_settings", 5, 1.minute).performed!
 
-    settings = params.except(:group_id, :protocol)
-    enable_tls = settings[:ssl] == "true"
+    settings = params.except(:name, :protocol)
     email_host = params[:host]
 
     if !%w[smtp imap].include?(params[:protocol])
@@ -680,13 +736,19 @@ class GroupsController < ApplicationController
       begin
         case params[:protocol]
         when "smtp"
-          enable_starttls_auto = false
-          settings.delete(:ssl)
+          raise Discourse::InvalidParameters if params[:ssl_mode].blank?
+
+          settings.delete(:ssl_mode)
+
+          if params[:ssl_mode].blank? ||
+               !Group.smtp_ssl_modes.values.include?(params[:ssl_mode].to_i)
+            raise Discourse::InvalidParameters.new("SSL mode must be present and valid")
+          end
 
           final_settings =
             settings.merge(
-              enable_tls: enable_tls,
-              enable_starttls_auto: enable_starttls_auto,
+              enable_tls: params[:ssl_mode].to_i == Group.smtp_ssl_modes[:ssl_tls],
+              enable_starttls_auto: params[:ssl_mode].to_i == Group.smtp_ssl_modes[:starttls],
             ).permit(:host, :port, :username, :password, :enable_tls, :enable_starttls_auto, :debug)
           EmailSettingsValidator.validate_as_user(
             current_user,
@@ -694,8 +756,17 @@ class GroupsController < ApplicationController
             **final_settings.to_h.symbolize_keys,
           )
         when "imap"
+          raise Discourse::InvalidParameters if params[:ssl].blank?
+
           final_settings =
-            settings.merge(ssl: enable_tls).permit(:host, :port, :username, :password, :ssl, :debug)
+            settings.merge(ssl: settings[:ssl] == "true").permit(
+              :host,
+              :port,
+              :username,
+              :password,
+              :ssl,
+              :debug,
+            )
           EmailSettingsValidator.validate_as_user(
             current_user,
             "imap",
@@ -758,7 +829,7 @@ class GroupsController < ApplicationController
         :incoming_email,
         :smtp_server,
         :smtp_port,
-        :smtp_ssl,
+        :smtp_ssl_mode,
         :smtp_enabled,
         :smtp_updated_by,
         :smtp_updated_at,
@@ -797,9 +868,23 @@ class GroupsController < ApplicationController
     params.require(:group).permit(*attributes)
   end
 
+  def find_group_for_show(ensure_can_see: true)
+    group =
+      if params[:id]
+        Group.find_by(id: params[:id])
+      elsif params[:name]
+        Group.find_by("LOWER(name) = ?", params[:name].downcase)
+      end
+
+    raise Discourse::NotFound if ensure_can_see && !guardian.can_see_group?(group)
+    group
+  end
+
   def find_group(param_name, ensure_can_see: true)
     name = params.require(param_name)
+
     group = Group.find_by("LOWER(name) = ?", name.downcase)
+
     raise Discourse::NotFound if ensure_can_see && !guardian.can_see_group?(group)
     group
   end
@@ -836,7 +921,7 @@ class GroupsController < ApplicationController
 
     if should_clear_smtp
       attributes[:smtp_server] = nil
-      attributes[:smtp_ssl] = false
+      attributes[:smtp_ssl_mode] = false
       attributes[:smtp_port] = nil
       attributes[:email_username] = nil
       attributes[:email_password] = nil

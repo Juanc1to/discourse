@@ -40,7 +40,7 @@ class PostRevisor
     end
   end
 
-  POST_TRACKED_FIELDS = %w[raw cooked edit_reason user_id wiki post_type]
+  POST_TRACKED_FIELDS = %w[raw cooked edit_reason user_id wiki post_type locale]
 
   attr_reader :category_changed, :post_revision
 
@@ -61,7 +61,7 @@ class PostRevisor
     tracked_topic_fields[field] = block
 
     # Define it in the serializer unless it already has been defined
-    unless PostRevisionSerializer.instance_methods(false).include?("#{field}_changes".to_sym)
+    if PostRevisionSerializer.instance_methods(false).exclude?("#{field}_changes".to_sym)
       PostRevisionSerializer.add_compared_field(field)
     end
   end
@@ -96,7 +96,7 @@ class PostRevisor
       end
 
       tc.record_change("category_id", current_category&.id, new_category&.id)
-      tc.check_result(tc.topic.change_category_to_id(new_category_id))
+      tc.check_result(tc.topic.change_category_to_id(new_category_id, silent: @silent))
       create_small_action_for_category_change(
         topic: tc.topic,
         user: tc.user,
@@ -154,7 +154,8 @@ class PostRevisor
   end
 
   def self.create_small_action_for_category_change(topic:, user:, old_category:, new_category:)
-    if !old_category || !new_category || !SiteSetting.create_post_for_category_and_tag_changes
+    if !old_category || !new_category || !SiteSetting.create_post_for_category_and_tag_changes ||
+         SiteSetting.whispers_allowed_groups.blank?
       return
     end
 
@@ -165,18 +166,21 @@ class PostRevisor
         from: "##{old_category.slug_ref}",
         to: "##{new_category.slug_ref}",
       ),
-      post_type: Post.types[:small_action],
+      post_type: Post.types[:whisper],
       action_code: "category_changed",
     )
   end
 
   def self.create_small_action_for_tag_changes(topic:, user:, added_tags:, removed_tags:)
-    return if !SiteSetting.create_post_for_category_and_tag_changes
+    if !SiteSetting.create_post_for_category_and_tag_changes ||
+         SiteSetting.whispers_allowed_groups.blank?
+      return
+    end
 
     topic.add_moderator_post(
       user,
       tags_changed_raw(added: added_tags, removed: removed_tags),
-      post_type: Post.types[:small_action],
+      post_type: Post.types[:whisper],
       action_code: "tags_changed",
       custom_fields: {
         tags_added: added_tags,
@@ -211,6 +215,7 @@ class PostRevisor
   # - skip_validations: ask ActiveRecord to skip validations
   # - skip_revision: do not create a new PostRevision record
   # - skip_staff_log: skip creating an entry in the staff action log
+  # - silent: don't send notifications to user
   def revise!(editor, fields, opts = {})
     @editor = editor
     @fields = fields.with_indifferent_access
@@ -267,6 +272,9 @@ class PostRevisor
     @skip_revision = false
     @skip_revision = @opts[:skip_revision] if @opts.has_key?(:skip_revision)
 
+    @silent = false
+    @silent = @opts[:silent] if @opts.has_key?(:silent)
+
     @post.incoming_email&.update(imap_sync: true) if @post.incoming_email&.imap_uid
 
     old_raw = @post.raw
@@ -286,6 +294,9 @@ class PostRevisor
       revise_topic
       advance_draft_sequence if !opts[:keep_existing_draft]
     end
+
+    # bail out if the post or topic failed to save
+    return false if !successfully_saved_post_and_topic
 
     # Lock the post by default if the appropriate setting is true
     if (
@@ -312,15 +323,14 @@ class PostRevisor
     # it can fire events in sidekiq before the post is done saving
     # leading to corrupt state
     QuotedPost.extract_from(@post)
+    TopicLink.extract_from(@post)
+
+    Topic.reset_highest(@topic.id)
 
     post_process_post
-
-    update_topic_word_counts
     alert_users
     publish_changes
     grant_badge
-
-    TopicLink.extract_from(@post)
 
     ReviewablePost.queue_for_review_if_possible(@post, @editor) if should_create_new_version?
 
@@ -457,7 +467,7 @@ class PostRevisor
     remove_flags_and_unhide_post
   end
 
-  USER_ACTIONS_TO_REMOVE ||= [UserAction::REPLY, UserAction::RESPONSE]
+  USER_ACTIONS_TO_REMOVE = [UserAction::REPLY, UserAction::RESPONSE]
 
   def update_post
     if @fields.has_key?("user_id") && @fields["user_id"] != @post.user_id && @post.user_id != nil
@@ -540,7 +550,7 @@ class PostRevisor
     flaggers = []
     @post
       .post_actions
-      .where(post_action_type_id: PostActionType.flag_types_without_custom.values)
+      .where(post_action_type_id: PostActionType.flag_types_without_additional_message.values)
       .each do |action|
         flaggers << action.user if action.user
         action.remove_act!(Discourse.system_user)
@@ -683,6 +693,7 @@ class PostRevisor
 
     update_topic_excerpt
     update_category_description
+    update_topic_locale
   end
 
   def update_topic_excerpt
@@ -704,6 +715,10 @@ class PostRevisor
     end
   end
 
+  def update_topic_locale
+    @topic.update(locale: @fields[:locale]) if @fields.has_key?(:locale)
+  end
+
   def advance_draft_sequence
     @post.advance_draft_sequence
   end
@@ -712,19 +727,6 @@ class PostRevisor
     @post.invalidate_oneboxes = true
     @post.trigger_post_process
     DiscourseEvent.trigger(:post_edited, @post, self.topic_changed?, self)
-  end
-
-  def update_topic_word_counts
-    DB.exec(
-      "UPDATE topics
-                    SET word_count = (
-                      SELECT SUM(COALESCE(posts.word_count, 0))
-                      FROM posts
-                      WHERE posts.topic_id = :topic_id
-                    )
-                    WHERE topics.id = :topic_id",
-      topic_id: @topic.id,
-    )
   end
 
   def alert_users

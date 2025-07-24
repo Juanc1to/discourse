@@ -7,9 +7,9 @@ RSpec.describe "Separate sidebar mode", type: :system do
   let(:chat_drawer_page) { PageObjects::Pages::ChatDrawer.new }
   let(:header_component) { PageObjects::Components::Chat::Header.new }
 
-  fab!(:current_user) { Fabricate(:user) }
-  fab!(:channel_1) { Fabricate(:chat_channel) }
-  fab!(:channel_2) { Fabricate(:chat_channel) }
+  fab!(:current_user, :user)
+  fab!(:channel_1, :chat_channel)
+  fab!(:channel_2, :chat_channel)
 
   before do
     SiteSetting.navigation_menu = "sidebar"
@@ -40,7 +40,7 @@ RSpec.describe "Separate sidebar mode", type: :system do
       expect(sidebar_component).to have_section("chat-channels")
       expect(sidebar_component).to have_no_section("Categories")
 
-      find("#site-logo").click
+      click_logo
 
       expect(sidebar_component).to have_switch_button("chat")
       expect(header_component).to have_open_chat_button
@@ -101,7 +101,7 @@ RSpec.describe "Separate sidebar mode", type: :system do
         expect(sidebar_component).to have_section("Categories")
         expect(sidebar_component).to have_section("chat-channels")
 
-        find("#site-logo").click
+        click_logo
 
         expect(sidebar_component).to have_no_switch_button
         expect(header_component).to have_open_chat_button
@@ -177,7 +177,7 @@ RSpec.describe "Separate sidebar mode", type: :system do
         expect(sidebar_component).to have_section("chat-channels")
         expect(sidebar_component).to have_no_section("Categories")
 
-        find("#site-logo").click
+        click_logo
 
         expect(sidebar_component).to have_switch_button("chat")
         expect(header_component).to have_open_chat_button
@@ -203,6 +203,25 @@ RSpec.describe "Separate sidebar mode", type: :system do
         sidebar_component.switch_to_chat
 
         expect(sidebar_component).to have_section_link(channel_2.name, active: true)
+      end
+    end
+
+    context "with subfolder" do
+      let!(:channel_browse_page) { PageObjects::Pages::ChatBrowse.new }
+
+      before do
+        set_subfolder "/discuss"
+        chat_page.prefers_full_page
+      end
+
+      it "has the expected behavior" do
+        visit("/discuss/about")
+
+        sidebar_component.switch_to_chat
+        expect(channel_browse_page.component).to be_present
+
+        sidebar_component.switch_to_main
+        expect(page).to have_current_path("/discuss/about")
       end
     end
   end
@@ -273,7 +292,7 @@ RSpec.describe "Separate sidebar mode", type: :system do
         expect(sidebar_component).to have_section("chat-channels")
         expect(sidebar_component).to have_no_section("Categories")
 
-        find("#site-logo").click
+        click_logo
 
         expect(sidebar_component).to have_switch_button("chat")
         expect(header_component).to have_open_chat_button

@@ -1,63 +1,87 @@
+import { tracked } from "@glimmer/tracking";
 import Controller from "@ember/controller";
-import { and, readOnly } from "@ember/object/computed";
-import { inject as service } from "@ember/service";
+import { action, getProperties } from "@ember/object";
+import { and } from "@ember/object/computed";
+import { service } from "@ember/service";
 import { underscore } from "@ember/string";
 import { popupAjaxError } from "discourse/lib/ajax-error";
+import discourseComputed from "discourse/lib/decorators";
 import { NotificationLevels } from "discourse/lib/notification-levels";
 import DiscourseURL from "discourse/lib/url";
 import Category from "discourse/models/category";
 import PermissionType from "discourse/models/permission-type";
-import discourseComputed, { on } from "discourse-common/utils/decorators";
-import I18n from "discourse-i18n";
+import { i18n } from "discourse-i18n";
 
-export default Controller.extend({
-  dialog: service(),
-  site: service(),
-  router: service(),
+const FIELD_LIST = [
+  "name",
+  "slug",
+  "parent_category_id",
+  "description",
+  "color",
+  "text_color",
+  "style_type",
+  "emoji",
+  "icon",
+  "localizations",
+];
 
-  selectedTab: "general",
-  saving: false,
-  deleting: false,
-  panels: null,
-  showTooltip: false,
-  createdCategory: false,
-  expandedMenu: false,
-  mobileView: readOnly("site.mobileView"),
-  parentParams: null,
-  showDeleteReason: and("showTooltip", "model.cannot_delete_reason"),
+export default class EditCategoryTabsController extends Controller {
+  @service dialog;
+  @service site;
+  @service router;
 
-  @on("init")
-  _initPanels() {
-    this.setProperties({
-      panels: [],
-      validators: [],
-    });
-  },
+  @tracked breadcrumbCategories = this.site.get("categoriesList");
 
-  @discourseComputed("saving", "model.name", "model.color", "deleting")
-  disabled(saving, name, color, deleting) {
-    if (saving || deleting) {
+  selectedTab = "general";
+  saving = false;
+  deleting = false;
+  panels = [];
+  showTooltip = false;
+  createdCategory = false;
+  expandedMenu = false;
+  parentParams = null;
+  validators = [];
+  textColors = ["000000", "FFFFFF"];
+
+  @and("showTooltip", "model.cannot_delete_reason") showDeleteReason;
+
+  get formData() {
+    const data = getProperties(this.model, ...FIELD_LIST);
+
+    if (!this.model.styleType) {
+      data.style_type = "square";
+    }
+
+    return data;
+  }
+
+  @action
+  canSaveForm(transientData) {
+    if (!transientData.name) {
+      return false;
+    }
+
+    if (!transientData.color) {
+      return false;
+    }
+
+    if (this.saving || this.deleting) {
       return true;
     }
-    if (!name) {
-      return true;
-    }
-    if (!color) {
-      return true;
-    }
-    return false;
-  },
+
+    return true;
+  }
 
   @discourseComputed("saving", "deleting")
   deleteDisabled(saving, deleting) {
     return deleting || saving || false;
-  },
+  }
 
   @discourseComputed("name")
   categoryName(name) {
     name = name || "";
-    return name.trim().length > 0 ? name : I18n.t("preview");
-  },
+    return name.trim().length > 0 ? name : i18n("preview");
+  }
 
   @discourseComputed("saving", "model.id")
   saveLabel(saving, id) {
@@ -65,92 +89,102 @@ export default Controller.extend({
       return "saving";
     }
     return id ? "category.save" : "category.create";
-  },
+  }
 
   @discourseComputed("model.id", "model.name")
   title(id, name) {
     return id
-      ? I18n.t("category.edit_dialog_title", {
+      ? i18n("category.edit_dialog_title", {
           categoryName: name,
         })
-      : I18n.t("category.create");
-  },
+      : i18n("category.create");
+  }
 
   @discourseComputed("selectedTab")
   selectedTabTitle(tab) {
-    return I18n.t(`category.${underscore(tab)}`);
-  },
+    return i18n(`category.${underscore(tab)}`);
+  }
 
-  actions: {
-    registerValidator(validator) {
-      this.validators.push(validator);
-    },
+  @action
+  registerValidator(validator) {
+    this.validators.push(validator);
+  }
 
-    saveCategory() {
-      if (this.validators.some((validator) => validator())) {
-        return;
-      }
-      const model = this.model;
-      const parentCategory = this.site.categories.findBy(
-        "id",
-        parseInt(model.parent_category_id, 10)
-      );
+  @action
+  isLeavingForm(transition) {
+    return !transition.targetName.startsWith("editCategory.tabs");
+  }
 
-      this.set("saving", true);
-      const previousParentCategory = model.get("parentCategory");
-      model.set("parentCategory", parentCategory);
+  @action
+  saveCategory(transientData) {
+    if (this.validators.some((validator) => validator())) {
+      return;
+    }
 
-      model
-        .save()
-        .then((result) => {
-          this.set("saving", false);
-          if (!model.id) {
-            model.setProperties({
-              slug: result.category.slug,
-              id: result.category.id,
-              can_edit: result.category.can_edit,
-              permission: PermissionType.FULL,
-              notification_level: NotificationLevels.REGULAR,
-            });
-            this.site.updateCategory(model);
-            this.router.transitionTo("editCategory", Category.slugFor(model));
-          }
-        })
-        .catch((error) => {
-          popupAjaxError(error);
-          this.set("saving", false);
-          model.set("parent_category_id", undefined);
-          model.set("parentCategory", previousParentCategory);
-        });
-    },
+    this.model.setProperties(transientData);
 
-    deleteCategory() {
-      this.set("deleting", true);
-      this.dialog.yesNoConfirm({
-        message: I18n.t("category.delete_confirm"),
-        didConfirm: () => {
-          this.model
-            .destroy()
-            .then(() => {
-              this.router.transitionTo("discovery.categories");
-            })
-            .catch(() => {
-              this.displayErrors([I18n.t("category.delete_error")]);
-            })
-            .finally(() => {
-              this.set("deleting", false);
-            });
-        },
-        didCancel: () => this.set("deleting", false),
+    this.set("saving", true);
+
+    this.model
+      .save()
+      .then((result) => {
+        if (!this.model.id) {
+          this.model.setProperties({
+            slug: result.category.slug,
+            id: result.category.id,
+            can_edit: result.category.can_edit,
+            permission: PermissionType.FULL,
+            notification_level: NotificationLevels.REGULAR,
+          });
+          this.site.updateCategory(this.model);
+          this.router.transitionTo(
+            "editCategory",
+            Category.slugFor(this.model)
+          );
+        }
+        // force a reload of the category list to track changes to style type
+        this.breadcrumbCategories = this.site.categoriesList.map((c) =>
+          c.id === this.model.id ? this.model : c
+        );
+      })
+      .catch((error) => {
+        popupAjaxError(error);
+        this.model.set("parent_category_id", undefined);
+      })
+      .finally(() => {
+        this.set("saving", false);
       });
-    },
+  }
 
-    toggleDeleteTooltip() {
-      this.toggleProperty("showTooltip");
-    },
+  @action
+  deleteCategory() {
+    this.set("deleting", true);
+    this.dialog.deleteConfirm({
+      title: i18n("category.delete_confirm"),
+      didConfirm: () => {
+        this.model
+          .destroy()
+          .then(() => {
+            this.router.transitionTo("discovery.categories");
+          })
+          .catch(() => {
+            this.displayErrors([i18n("category.delete_error")]);
+          })
+          .finally(() => {
+            this.set("deleting", false);
+          });
+      },
+      didCancel: () => this.set("deleting", false),
+    });
+  }
 
-    goBack() {
-      DiscourseURL.routeTo(this.model.url);
-    },
-  },
-});
+  @action
+  toggleDeleteTooltip() {
+    this.toggleProperty("showTooltip");
+  }
+
+  @action
+  goBack() {
+    DiscourseURL.routeTo(this.model.url);
+  }
+}

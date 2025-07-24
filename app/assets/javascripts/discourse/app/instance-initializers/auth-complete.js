@@ -1,10 +1,9 @@
 import EmberObject from "@ember/object";
 import { next } from "@ember/runloop";
-import CreateAccount from "discourse/components/modal/create-account";
-import LoginModal from "discourse/components/modal/login";
+import { htmlSafe } from "@ember/template";
 import cookie, { removeCookie } from "discourse/lib/cookie";
 import DiscourseUrl from "discourse/lib/url";
-import I18n from "discourse-i18n";
+import { i18n } from "discourse-i18n";
 
 // This is happening outside of the app via popup
 const AuthErrors = [
@@ -51,33 +50,33 @@ export default {
               .lookup("controller:invites-show")
               .authenticationComplete(options);
           } else {
-            const modal = owner.lookup("service:modal");
             const siteSettings = owner.lookup("service:site-settings");
 
             const loginError = (errorMsg, className, properties, callback) => {
-              const applicationRoute = owner.lookup("route:application");
               const applicationController = owner.lookup(
                 "controller:application"
               );
-              modal.show(LoginModal, {
-                model: {
-                  showNotActivated: (props) =>
-                    applicationRoute.send("showNotActivated", props),
-                  showCreateAccount: (props) =>
-                    applicationRoute.send("showCreateAccount", props),
-                  canSignUp: applicationController.canSignUp,
-                  flash: errorMsg,
-                  flashType: className || "success",
-                  awaitingApproval: options.awaiting_approval,
-                  ...properties,
-                },
+
+              const loginProps = {
+                canSignUp: applicationController.canSignUp,
+                flash: errorMsg,
+                flashType: className || "success",
+                awaitingApproval: options.awaiting_approval,
+                ...properties,
+              };
+
+              router.transitionTo("login").then((login) => {
+                Object.keys(loginProps || {}).forEach((key) => {
+                  login.controller.set(key, loginProps[key]);
+                });
               });
+
               next(() => callback?.());
             };
 
             if (options.omniauth_disallow_totp) {
               return loginError(
-                I18n.t("login.omniauth_disallow_totp"),
+                i18n("login.omniauth_disallow_totp"),
                 "error",
                 {
                   loginName: options.email,
@@ -90,7 +89,7 @@ export default {
             for (let i = 0; i < AuthErrors.length; i++) {
               const cond = AuthErrors[i];
               if (options[cond]) {
-                return loginError(I18n.t(`login.${cond}`));
+                return loginError(htmlSafe(i18n(`login.${cond}`)));
               }
             }
 
@@ -116,17 +115,22 @@ export default {
               return;
             }
 
-            next(() =>
-              modal.show(CreateAccount, {
-                model: {
-                  accountEmail: options.email,
-                  accountUsername: options.username,
-                  accountName: options.name,
-                  authOptions: EmberObject.create(options),
-                  skipConfirmation: siteSettings.auth_skip_create_confirm,
-                },
-              })
-            );
+            next(() => {
+              const createAccountProps = {
+                accountEmail: options.email,
+                accountUsername: options.username,
+                accountName: options.name,
+                authOptions: EmberObject.create(options),
+                skipConfirmation: siteSettings.auth_skip_create_confirm,
+              };
+
+              router.transitionTo("signup").then((signup) => {
+                const signupController =
+                  signup.controller || owner.lookup("controller:signup");
+                Object.assign(signupController, createAccountProps);
+                signupController.handleSkipConfirmation();
+              });
+            });
           }
         });
       });

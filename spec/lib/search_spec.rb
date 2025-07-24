@@ -9,6 +9,44 @@ RSpec.describe Search do
     Jobs.run_immediately!
   end
 
+  describe ".need_segmenting?" do
+    subject(:search) { described_class }
+
+    context "when data only contains digits" do
+      let(:data) { "510" }
+
+      it { is_expected.not_to be_need_segmenting(data) }
+    end
+
+    context "when data does not only contain digits" do
+      context "when data is a full URL" do
+        let(:data) { "http://localhost/t/-/510" }
+
+        it { is_expected.not_to be_need_segmenting(data) }
+      end
+
+      context "when data is a path" do
+        let(:data) { "/t/-/510" }
+
+        it { is_expected.not_to be_need_segmenting(data) }
+      end
+
+      context "when data makes `URI#path` return `nil`" do
+        let(:data) { "in:solved%20category:50%20order:likes" }
+
+        it "doesn’t raise an error" do
+          expect { search.need_segmenting?(data) }.not_to raise_error
+        end
+      end
+
+      context "when data is something else" do
+        let(:data) { "text" }
+
+        it { is_expected.to be_need_segmenting(data) }
+      end
+    end
+  end
+
   describe "#ts_config" do
     it "maps locales to correct Postgres dictionaries" do
       expect(Search.ts_config).to eq("english")
@@ -63,7 +101,7 @@ RSpec.describe Search do
     before { SiteSetting.tagging_enabled = true }
 
     context "with staff tags" do
-      fab!(:hidden_tag) { Fabricate(:tag) }
+      fab!(:hidden_tag, :tag)
       let!(:staff_tag_group) do
         Fabricate(:tag_group, permissions: { "staff" => 1 }, tag_names: [hidden_tag.name])
       end
@@ -170,7 +208,7 @@ RSpec.describe Search do
 
   describe "users" do
     fab!(:user) { Fabricate(:user, username: "DonaldDuck") }
-    fab!(:user2) { Fabricate(:user) }
+    fab!(:user2, :user)
 
     before do
       SearchIndexer.enable
@@ -766,11 +804,11 @@ RSpec.describe Search do
     end
 
     context "with all topics" do
-      let!(:u1) { Fabricate(:user, username: "fred", name: "bob jones", email: "foo+1@bar.baz") }
-      let!(:u2) { Fabricate(:user, username: "bob", name: "fred jones", email: "foo+2@bar.baz") }
-      let!(:u3) { Fabricate(:user, username: "jones", name: "bob fred", email: "foo+3@bar.baz") }
+      let!(:u1) { Fabricate(:user, username: "fred", name: "bob jones", email: "fred@bar.baz") }
+      let!(:u2) { Fabricate(:user, username: "bob", name: "fred jones", email: "bob@bar.baz") }
+      let!(:u3) { Fabricate(:user, username: "jones", name: "bob fred", email: "jones@bar.baz") }
       let!(:u4) do
-        Fabricate(:user, username: "alice", name: "bob fred", email: "foo+4@bar.baz", admin: true)
+        Fabricate(:user, username: "alice", name: "bob fred", email: "alice@bar.baz", admin: true)
       end
 
       let!(:public_topic) { Fabricate(:topic, user: u1) }
@@ -1026,6 +1064,13 @@ RSpec.describe Search do
       expect(results.posts).to eq([post])
     end
 
+    it "does not return hidden posts" do
+      Fabricate(:post, raw: "Can you see me? I'm a hidden post", hidden: true)
+
+      results = Search.execute("hidden post")
+      expect(results.posts.count).to eq(0)
+    end
+
     it "does not rely on postgres's proximity opreators" do
       topic.update!(title: "End-to-end something something testing")
 
@@ -1053,7 +1098,15 @@ RSpec.describe Search do
       end
 
       it "works in Chinese" do
-        SiteSetting.search_tokenize_chinese_japanese_korean = true
+        SiteSetting.search_tokenize_chinese = true
+        post = new_post("I am not in English 你今天怎麼樣")
+
+        results = Search.execute("你今天", search_context: post.topic)
+        expect(results.posts.map(&:id)).to eq([post.id])
+      end
+
+      it "works in Japanese" do
+        SiteSetting.search_tokenize_japanese = true
         post = new_post("I am not in English 何点になると思いますか")
 
         results = Search.execute("何点になると思", search_context: post.topic)
@@ -1246,6 +1299,41 @@ RSpec.describe Search do
         slug: "test",
         search_priority: Searchable::PRIORITIES[:ignore],
       )
+    end
+
+    it "allow searching for multiple categories" do
+      category2 = Fabricate(:category, name: "abc")
+      topic2 = Fabricate(:topic, category: category2)
+      post2 = Fabricate(:post, topic: topic2, raw: "snow monkey")
+
+      category3 = Fabricate(:category, name: "def")
+      topic3 = Fabricate(:topic, category: category3)
+      post3 = Fabricate(:post, topic: topic3, raw: "snow monkey")
+
+      search = Search.execute("monkey category:abc,def")
+      expect(search.posts.map(&:id)).to contain_exactly(post2.id, post3.id)
+
+      search = Search.execute("monkey categories:abc,def")
+      expect(search.posts.map(&:id)).to contain_exactly(post2.id, post3.id)
+
+      search = Search.execute("monkey categories:xxxxx,=abc,=def")
+      expect(search.posts.map(&:id)).to contain_exactly(post2.id, post3.id)
+
+      search = Search.execute("snow category:abc,#{category.id}")
+      expect(search.posts.map(&:id)).to contain_exactly(post.id, post2.id)
+
+      child_category = Fabricate(:category, parent_category: category2)
+      child_topic = Fabricate(:topic, category: child_category)
+      child_post = Fabricate(:post, topic: child_topic, raw: "snow monkey")
+
+      search = Search.execute("monkey category:zzz,nnn,=abc,mmm")
+      expect(search.posts.map(&:id)).to contain_exactly(post2.id)
+
+      search =
+        Search.execute(
+          "monkey category:0007847874874874874748749398384398439843984938439843948394834984934839483984983498394834983498349834983,zzz,nnn,abc,mmm",
+        )
+      expect(search.posts.map(&:id)).to contain_exactly(post2.id, child_post.id)
     end
 
     it "should return the right categories" do
@@ -1555,10 +1643,38 @@ RSpec.describe Search do
     let!(:post_2) { Fabricate(:post, topic: topic_2) }
 
     describe ".prepare_data" do
-      it "removes punctuations" do
-        SiteSetting.search_tokenize_japanese = true
+      subject(:prepared_data) { Search.prepare_data(data) }
 
-        expect(Search.prepare_data(post.raw)).to eq("This is some japanese text 日本 が 大好き です")
+      let(:data) { post.raw }
+
+      before { SiteSetting.search_tokenize_japanese = true }
+
+      it "removes punctuations" do
+        expect(prepared_data).to eq("This is some japanese text 日本 が 大好き です")
+      end
+
+      context "when providing only an URL" do
+        let(:data) { "http://localhost/t/-/51" }
+
+        it "does not change it" do
+          expect(prepared_data).to eq(data)
+        end
+      end
+
+      context "when providing only a path" do
+        let(:data) { "/t/-/51" }
+
+        it "does not change it" do
+          expect(prepared_data).to eq(data)
+        end
+      end
+
+      context "when providing only an ID" do
+        let(:data) { "51" }
+
+        it "does not change it" do
+          expect(prepared_data).to eq(data)
+        end
       end
     end
 
@@ -1574,31 +1690,68 @@ RSpec.describe Search do
         SiteSetting.refresh!
       end
 
-      it "finds posts containing Japanese text if tokenization is forced" do
-        SiteSetting.search_tokenize_japanese = true
+      context "when tokenization is forced" do
+        before { SiteSetting.search_tokenize_japanese = true }
 
-        expect(Search.execute("日本").posts.map(&:id)).to eq([post_2.id, post.id])
-        expect(Search.execute("日").posts.map(&:id)).to eq([post_2.id, post.id])
+        it "finds posts containing Japanese text" do
+          expect(Search.execute("日本").posts.map(&:id)).to eq([post_2.id, post.id])
+          expect(Search.execute("日").posts.map(&:id)).to eq([post_2.id, post.id])
+        end
       end
 
-      it "find posts containing search term when site's locale is set to Japanese" do
-        SiteSetting.default_locale = "ja"
+      context "when default locale is set to Japanese" do
+        before { SiteSetting.default_locale = "ja" }
 
-        expect(Search.execute("日本").posts.map(&:id)).to eq([post_2.id, post.id])
-        expect(Search.execute("日").posts.map(&:id)).to eq([post_2.id, post.id])
-      end
+        it "find posts containing search term" do
+          expect(Search.execute("日本").posts.map(&:id)).to eq([post_2.id, post.id])
+          expect(Search.execute("日").posts.map(&:id)).to eq([post_2.id, post.id])
+        end
 
-      it "does not include superfluous spaces in blurbs" do
-        SiteSetting.default_locale = "ja"
+        it "does not include superfluous spaces in blurbs" do
+          post.update!(
+            raw: "場サアマネ織企ういかせ竹域ヱイマ穂基ホ神3予読ずねいぱ松査ス禁多サウ提懸イふ引小43改こょドめ。深とつぐ主思料農ぞかル者杯検める活分えほづぼ白犠",
+          )
 
-        post.update!(
-          raw: "場サアマネ織企ういかせ竹域ヱイマ穂基ホ神3予読ずねいぱ松査ス禁多サウ提懸イふ引小43改こょドめ。深とつぐ主思料農ぞかル者杯検める活分えほづぼ白犠",
-        )
+          results = Search.execute("ういかせ竹域", type_filter: "topic")
 
-        results = Search.execute("ういかせ竹域", type_filter: "topic")
+          expect(results.posts.length).to eq(1)
+          expect(results.blurb(results.posts.first)).to include("ういかせ竹域")
+        end
 
-        expect(results.posts.length).to eq(1)
-        expect(results.blurb(results.posts.first)).to include("ういかせ竹域")
+        context "when searching for a topic in particular" do
+          subject(:results) do
+            described_class.execute(
+              term,
+              guardian: Discourse.system_user.guardian,
+              type_filter: "topic",
+              search_for_id: true,
+            )
+          end
+
+          context "when searching by topic ID" do
+            let(:term) { topic.id }
+
+            it "finds the proper post" do
+              expect(results.posts.first).to have_attributes(topic: topic, post_number: 1)
+            end
+          end
+
+          context "when searching by topic URL" do
+            let(:term) { "http://#{Discourse.current_hostname}/t/-/#{topic.id}" }
+
+            it "finds the proper post" do
+              expect(results.posts.first).to have_attributes(topic: topic, post_number: 1)
+            end
+          end
+
+          context "when searching by topic path" do
+            let(:term) { "/t/-/#{topic.id}" }
+
+            it "finds the proper post" do
+              expect(results.posts.first).to have_attributes(topic: topic, post_number: 1)
+            end
+          end
+        end
       end
     end
   end
@@ -1760,6 +1913,22 @@ RSpec.describe Search do
       expect(Search.execute("test after:jan").posts).to contain_exactly(post_1, post_2)
     end
 
+    it "supports before/after filters and is not affected by the `search_recent_regular_posts_offset_post_id` site setting" do
+      post_1 = Fabricate(:post, created_at: Time.zone.parse("2000-06-24"), like_count: 15)
+      post_2 = Fabricate(:post, created_at: Time.zone.parse("2000-06-26"), like_count: 5)
+
+      SiteSetting.search_recent_regular_posts_offset_post_id = post_2.id
+      # Disable pagination as we are only concerned about the posts returned in the first page.
+      SiteSetting.search_page_size = 1
+
+      expect(
+        Search
+          .execute("after:2000-01-01 before:2001-01-01 order:likes", search_type: :full_page)
+          .posts
+          .map(&:id),
+      ).to contain_exactly(post_1.id)
+    end
+
     it "supports in:first, user:, @username" do
       post_1 = Fabricate(:post, raw: "hi this is a test 123 123", topic: topic)
       post_2 = Fabricate(:post, raw: "boom boom shake the room test", topic: topic)
@@ -1791,8 +1960,8 @@ RSpec.describe Search do
     context "when searching for posts made by users of a group" do
       fab!(:topic) { Fabricate(:topic, created_at: 3.months.ago) }
       fab!(:user)
-      fab!(:user_2) { Fabricate(:user) }
-      fab!(:user_3) { Fabricate(:user) }
+      fab!(:user_2, :user)
+      fab!(:user_3, :user)
       fab!(:group) { Fabricate(:group, name: "Like_a_Boss").tap { |g| g.add(user) } }
       fab!(:group_2) { Fabricate(:group).tap { |g| g.add(user_2) } }
       let!(:post) { Fabricate(:post, raw: "hi this is a test 123 123", topic: topic, user: user) }
@@ -2132,6 +2301,18 @@ RSpec.describe Search do
 
       expect(Search.execute("Topic min_views:150").posts.map(&:id)).to eq([post2.id])
       expect(Search.execute("Topic max_views:150").posts.map(&:id)).to eq([post.id])
+    end
+
+    it "can order by likes" do
+      raw = "Foo bar lorem ipsum"
+      topic = Fabricate(:topic)
+      post1 = Fabricate(:post, topic:, raw:, like_count: 1)
+      post2 = Fabricate(:post, topic:, raw:, like_count: 2)
+      post3 = Fabricate(:post, topic:, raw:, like_count: 3)
+
+      expect(Search.execute("topic:#{topic.id} bar order:likes").posts.map(&:id)).to eq(
+        [post3, post2, post1].map(&:id),
+      )
     end
 
     it "can search for terms with dots" do
@@ -2487,6 +2668,42 @@ RSpec.describe Search do
     end
   end
 
+  describe "include:invisible / include:unlisted" do
+    it "allows including invisible topics in the results for users that can see unlisted topics" do
+      topic = Fabricate(:topic, title: "I am testing a search", visible: false)
+      post = Fabricate(:post, topic: topic, raw: "this is the first post", post_number: 1)
+
+      results = Search.execute("testing include:invisible", guardian: Guardian.new(admin))
+      expect(results.posts.map(&:id)).to eq([post.id])
+
+      results =
+        Search.execute(
+          "testing include:unlisted",
+          guardian: Guardian.new(Fabricate(:trust_level_4)),
+        )
+      expect(results.posts.map(&:id)).to eq([post.id])
+
+      results = Search.execute("testing", guardian: Guardian.new(admin))
+      expect(results.posts).to eq([])
+    end
+
+    it "won't work for users that can't see unlisted topics" do
+      topic = Fabricate(:topic, title: "I am testing a search", visible: false)
+      _post = Fabricate(:post, topic: topic, raw: "this is the first post", post_number: 1)
+
+      results =
+        Search.execute("testing include:invisible", guardian: Guardian.new(Fabricate(:user)))
+      expect(results.posts).to eq([])
+
+      results =
+        Search.execute(
+          "testing include:unlisted",
+          guardian: Guardian.new(Fabricate(:trust_level_3)),
+        )
+      expect(results.posts).to eq([])
+    end
+  end
+
   describe "ignore_diacritics" do
     before { SiteSetting.search_ignore_accents = true }
     let!(:post1) { Fabricate(:post, raw: "สวัสดี Rágis hello") }
@@ -2637,10 +2854,26 @@ RSpec.describe Search do
 
     it "allows to define custom filter" do
       expect(Search.new("advanced").execute.posts).to eq([post1, post0])
+
       Search.advanced_filter(/^min_chars:(\d+)$/) do |posts, match|
         posts.where("(SELECT LENGTH(p2.raw) FROM posts p2 WHERE p2.id = posts.id) >= ?", match.to_i)
       end
+
       expect(Search.new("advanced min_chars:50").execute.posts).to eq([post0])
+    ensure
+      Search.advanced_filters.delete(/^min_chars:(\d+)$/)
+    end
+
+    it "forces custom filters matchers to be case insensitive" do
+      expect(Search.new("advanced").execute.posts).to eq([post1, post0])
+
+      Search.advanced_filter(/^MIN_CHARS:(\d+)$/) do |posts, match|
+        posts.where("(SELECT LENGTH(p2.raw) FROM posts p2 WHERE p2.id = posts.id) >= ?", match.to_i)
+      end
+
+      expect(Search.new("advanced Min_Chars:50").execute.posts).to eq([post0])
+    ensure
+      Search.advanced_filters.delete(/^MIN_CHARS:(\d+)$/)
     end
 
     it "allows to define custom order" do
@@ -2649,6 +2882,8 @@ RSpec.describe Search do
       Search.advanced_order(:chars) { |posts| posts.reorder("MAX(LENGTH(posts.raw)) DESC") }
 
       expect(Search.new("advanced order:chars").execute.posts).to eq([post0, post1])
+    ensure
+      Search.advanced_orders.delete(:chars)
     end
   end
 
@@ -2771,7 +3006,6 @@ RSpec.describe Search do
 
   context "when max_duplicate_search_index_terms limits duplication" do
     before { SearchIndexer.enable }
-
     after { SearchIndexer.disable }
 
     it "correctly ranks topics" do
@@ -2814,5 +3048,122 @@ RSpec.describe Search do
       expect(sql).to include("ORDER BY posts.created_at DESC")
       expect(sql).to match(/where.*topics.closed/i)
     end
+  end
+
+  describe "bot search" do
+    fab!(:bot)
+    fab!(:bot_topic) { Fabricate(:topic, title: "this is a topic by a bot") }
+    fab!(:bot_post) do
+      Fabricate(:post, user: bot, topic: bot_topic, raw: "this is a regular post by a bot")
+    end
+
+    fab!(:human_post) { Fabricate(:post, topic: topic, raw: "this is a regular post not by a bot") }
+
+    before do
+      SearchIndexer.enable
+      SearchIndexer.index(bot_post, force: true)
+      SearchIndexer.index(human_post, force: true)
+    end
+
+    it "works as expected" do
+      # include bot posts by default
+      results = Search.execute("bot", guardian: Guardian.new)
+      expect(results.posts).to contain_exactly(bot_post, human_post)
+
+      # bots only
+      results = Search.execute("bot in:bot", guardian: Guardian.new)
+      expect(results.posts).to contain_exactly(bot_post)
+
+      # allows searching for human only
+      results = Search.execute("bot in:human", guardian: Guardian.new)
+      expect(results.posts).to contain_exactly(human_post)
+    end
+  end
+
+  describe "whisper search" do
+    fab!(:topic2, :topic)
+    fab!(:user)
+    fab!(:whisperer, :user)
+    fab!(:whisperers_group, :group)
+    fab!(:regular_post) do
+      Fabricate(:post, topic: topic, raw: "this is a regular post with whisper content")
+    end
+    fab!(:whisper_post) do
+      Fabricate(
+        :post,
+        topic: topic2,
+        raw: "this is a whisper post",
+        post_type: Post.types[:whisper],
+      )
+    end
+
+    before do
+      SiteSetting.whispers_allowed_groups = "#{Group::AUTO_GROUPS[:staff]}|#{whisperers_group.id}"
+      whisperers_group.add(whisperer)
+      SearchIndexer.enable
+      [regular_post, whisper_post].each { |post| SearchIndexer.index(post, force: true) }
+    end
+
+    it "works as expected" do
+      # note this is simple enough, saving up on all the reindexing over and over
+      # by running in a big batch
+
+      # anon
+      results = Search.execute("whisper", guardian: Guardian.new(user))
+      expect(results.posts).to contain_exactly(regular_post)
+
+      # staff
+      results = Search.execute("whisper", guardian: Guardian.new(admin))
+      expect(results.posts).to contain_exactly(regular_post, whisper_post)
+
+      # whisperer
+      results = Search.execute("whisper", guardian: Guardian.new(whisperer))
+      expect(results.posts).to contain_exactly(regular_post, whisper_post)
+
+      # in:whispers
+      results = Search.execute("whisper in:whispers", guardian: Guardian.new(admin))
+      expect(results.posts).to contain_exactly(whisper_post)
+
+      results = Search.execute("whisper in:whispers", guardian: Guardian.new(user))
+      expect(results.posts).to be_empty
+
+      # in:regular
+      results = Search.execute("whisper in:regular", guardian: Guardian.new(admin))
+      expect(results.posts).to contain_exactly(regular_post)
+
+      results = Search.execute("content in:regular", guardian: Guardian.new(admin))
+      expect(results.posts).to contain_exactly(regular_post)
+    end
+  end
+
+  it "orders posts by the timestamp of the user's last visit to each topic" do
+    user = Fabricate(:user)
+
+    post2 = nil
+    freeze_time 2.hours.ago do
+      post2 = Fabricate(:post, raw: "Read order term")
+      TopicUser.update_last_read(user, post2.topic.id, post2.post_number, 1, 0)
+    end
+
+    post1 = nil
+    freeze_time 1.hour.ago do
+      post1 = Fabricate(:post, raw: "Read order term")
+      TopicUser.update_last_read(user, post1.topic.id, post1.post_number, 1, 0)
+    end
+
+    _unread_post = Fabricate(:post, raw: "Read order term")
+
+    result = Search.execute("Read order term order:read", guardian: Guardian.new(user))
+    expect(result.posts.map(&:id)).to eq([post1.id, post2.id])
+
+    result = Search.execute("Read order term r", guardian: Guardian.new(user))
+
+    # also allow for the r shortcul like we have l
+    expect(result.posts.map(&:id)).to eq([post1.id, post2.id])
+
+    result = Search.execute("Read order term r", guardian: Guardian.new)
+
+    # no op on anon - all included
+    expect(result.posts.map(&:id).length).to eq(3)
   end
 end

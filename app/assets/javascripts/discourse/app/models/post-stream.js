@@ -1,22 +1,25 @@
+import { tracked } from "@glimmer/tracking";
 import { get } from "@ember/object";
 import { and, equal, not, or } from "@ember/object/computed";
 import { schedule } from "@ember/runloop";
+import { service } from "@ember/service";
 import { isEmpty } from "@ember/utils";
+import { TrackedObject } from "@ember-compat/tracked-built-ins";
 import { Promise } from "rsvp";
 import { ajax } from "discourse/lib/ajax";
+import discourseComputed from "discourse/lib/decorators";
+import deprecated from "discourse/lib/deprecated";
+import { deepMerge } from "discourse/lib/object";
 import PostsWithPlaceholders from "discourse/lib/posts-with-placeholders";
-import TopicSummary from "discourse/lib/topic-summary";
+import { applyBehaviorTransformer } from "discourse/lib/transformer";
 import DiscourseURL from "discourse/lib/url";
 import { highlightPost } from "discourse/lib/utilities";
 import RestModel from "discourse/models/rest";
 import { loadTopicView } from "discourse/models/topic";
-import User from "discourse/models/user";
-import deprecated from "discourse-common/lib/deprecated";
-import { deepMerge } from "discourse-common/lib/object";
-import discourseComputed from "discourse-common/utils/decorators";
-import I18n from "discourse-i18n";
+import { i18n } from "discourse-i18n";
 
 let _lastEditNotificationClick = null;
+
 export function setLastEditNotificationClick(
   topicId,
   postNumber,
@@ -34,22 +37,25 @@ export function resetLastEditNotificationClick() {
 }
 
 export default class PostStream extends RestModel {
-  posts = null;
-  stream = null;
-  userFilters = null;
-  loaded = null;
-  loadingAbove = null;
-  loadingBelow = null;
-  loadingFilter = null;
-  loadingNearPost = null;
-  stagingPost = null;
-  postsWithPlaceholders = null;
-  timelineLookup = null;
-  filterRepliesToPostNumber = null;
-  filterUpwardsPostID = null;
-  filter = null;
-  topicSummary = null;
-  lastId = null;
+  @service currentUser;
+  @service store;
+
+  @tracked filter;
+  @tracked filterRepliesToPostNumber;
+  @tracked filterUpwardsPostID;
+  @tracked gaps;
+  @tracked lastId;
+  @tracked loaded;
+  @tracked loadingAbove;
+  @tracked loadingBelow;
+  @tracked loadingFilter;
+  @tracked loadingNearPost;
+  @tracked postsWithPlaceholders;
+  @tracked stagingPost;
+  @tracked stream;
+  @tracked timelineLookup;
+  @tracked userFilters;
+  @tracked posts;
 
   @or("loadingAbove", "loadingBelow", "loadingFilter", "stagingPost") loading;
   @not("loading") notLoading;
@@ -83,7 +89,6 @@ export default class PostStream extends RestModel {
       loadingFilter: false,
       stagingPost: false,
       timelineLookup: [],
-      topicSummary: new TopicSummary(),
     });
   }
 
@@ -281,6 +286,7 @@ export default class PostStream extends RestModel {
         ? element.getBoundingClientRect().top
         : null;
 
+      // TODO (glimmer-post-stream) the Glimmer Post Stream does not listen to this event
       this.appEvents.trigger("post-stream:refresh");
 
       DiscourseURL.jumpToPost(postNumber, {
@@ -301,6 +307,7 @@ export default class PostStream extends RestModel {
       post_id: postID,
     });
     return this.refresh({ refreshInPlace: true }).then(() => {
+      // TODO (glimmer-post-stream) the Glimmer Post Stream does not listen to this event
       this.appEvents.trigger("post-stream:refresh");
 
       if (this.posts && this.posts.length > 1) {
@@ -435,6 +442,7 @@ export default class PostStream extends RestModel {
   }
 
   gapExpanded() {
+    // TODO (glimmer-post-stream) the Glimmer Post Stream does not listen to this event
     this.appEvents.trigger("post-stream:refresh");
 
     // resets the reply count in posts-filtered-notice
@@ -745,10 +753,9 @@ export default class PostStream extends RestModel {
       return this.findPostsByIds(this._loadingPostIds, opts)
         .then((posts) => {
           this._loadingPostIds = null;
-          const ignoredUsers =
-            User.current() && User.current().get("ignored_users");
+          const ignoredUsers = this.currentUser?.ignored_users;
           posts.forEach((p) => {
-            if (ignoredUsers && ignoredUsers.includes(p.username)) {
+            if (ignoredUsers?.includes(p.username)) {
               this.stream.removeObject(p.id);
               return;
             }
@@ -1051,6 +1058,11 @@ export default class PostStream extends RestModel {
       delete postStreamData.posts;
 
       // Update our attributes
+      const trackedGaps = {
+        before: new TrackedObject(postStreamData.gaps?.before || {}),
+        after: new TrackedObject(postStreamData.gaps?.after || {}),
+      };
+      postStreamData.gaps = trackedGaps;
       this.setProperties(postStreamData);
     }
   }
@@ -1153,6 +1165,10 @@ export default class PostStream extends RestModel {
       headers,
     }).then((result) => {
       this._setSuggestedTopics(result);
+      if (result.user_badges) {
+        this.topic.user_badges ??= {};
+        Object.assign(this.topic.user_badges, result.user_badges);
+      }
 
       const posts = get(result, "post_stream.posts");
 
@@ -1239,40 +1255,38 @@ export default class PostStream extends RestModel {
   // Handles an error loading a topic based on a HTTP status code. Updates
   // the text to the correct values.
   errorLoading(error) {
-    const topic = this.topic;
-    this.set("loadingFilter", false);
-    topic.set("errorLoading", true);
+    applyBehaviorTransformer(
+      "post-stream-error-loading",
+      () => {
+        const topic = this.topic;
+        this.set("loadingFilter", false);
+        topic.set("errorLoading", true);
 
-    if (!error.jqXHR) {
-      throw error;
-    }
+        if (!error.jqXHR) {
+          throw error;
+        }
 
-    const json = error.jqXHR.responseJSON;
-    if (json && json.extras && json.extras.html) {
-      topic.set("errorTitle", json.extras.title);
-      topic.set("errorHtml", json.extras.html);
-    } else {
-      topic.set("errorMessage", I18n.t("topic.server_error.description"));
-      topic.set("noRetry", error.jqXHR.status === 403);
-    }
-  }
-
-  collapseSummary() {
-    this.topicSummary.collapse();
-  }
-
-  showSummary(currentUser) {
-    this.topicSummary.generateSummary(currentUser, this.get("topic.id"));
-  }
-
-  processSummaryUpdate(update) {
-    this.topicSummary.processUpdate(update);
+        const json = error.jqXHR.responseJSON;
+        if (json && json.extras && json.extras.html) {
+          topic.set("errorTitle", json.extras.title);
+          topic.set("errorHtml", json.extras.html);
+        } else {
+          topic.set("errorMessage", i18n("topic.server_error.description"));
+          topic.set("noRetry", error.jqXHR.status === 403);
+        }
+      },
+      {
+        topic: this.topic,
+        error,
+      }
+    );
   }
 
   _initUserModels(post) {
-    post.user = User.create({
+    post.user = this.store.createRecord("user", {
       id: post.user_id,
       username: post.username,
+      avatar_template: post.avatar_template,
     });
 
     if (post.user_status) {
@@ -1280,7 +1294,9 @@ export default class PostStream extends RestModel {
     }
 
     if (post.mentioned_users) {
-      post.mentioned_users = post.mentioned_users.map((u) => User.create(u));
+      post.mentioned_users = post.mentioned_users.map((u) =>
+        this.store.createRecord("user", u)
+      );
     }
   }
 

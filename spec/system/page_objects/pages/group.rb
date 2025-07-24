@@ -17,6 +17,11 @@ module PageObjects
         self
       end
 
+      def delete_group
+        page.find("[data-test-selector='delete-group-button']").click
+        page.find(".dialog-footer .btn-danger").click
+      end
+
       def select_user_and_add(user)
         page.find(
           ".modal-container .user-chooser .multi-select-header .select-kit-header-wrapper",
@@ -27,6 +32,18 @@ module PageObjects
         ).click
         page.find(".modal-container button.add.btn-primary").click
         self
+      end
+
+      def click_manage
+        page.find(".user-primary-navigation .manage").click
+      end
+
+      def click_membership
+        page.find(".user-secondary-navigation li", text: "Membership").click
+      end
+
+      def click_save
+        page.find(".group-manage-save").click
       end
     end
   end

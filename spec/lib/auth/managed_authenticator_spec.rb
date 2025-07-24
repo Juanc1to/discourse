@@ -95,8 +95,8 @@ RSpec.describe Auth::ManagedAuthenticator do
     end
 
     describe "connecting to another user account" do
-      fab!(:user1) { Fabricate(:user) }
-      fab!(:user2) { Fabricate(:user) }
+      fab!(:user1, :user)
+      fab!(:user2, :user)
       before do
         UserAssociatedAccount.create!(user: user1, provider_name: "myauth", provider_uid: "1234")
       end
@@ -290,6 +290,14 @@ RSpec.describe Auth::ManagedAuthenticator do
         expect {
           result =
             authenticator.after_create_account(user, create_auth_result(extra_data: create_hash))
+        }.not_to change { Jobs::DownloadAvatarFromUrl.jobs.count }
+      end
+
+      it "does not schedule if image is empty" do
+        association.info["image"] = ""
+        association.save!
+        expect {
+          authenticator.after_create_account(user, create_auth_result(extra_data: create_hash))
         }.not_to change { Jobs::DownloadAvatarFromUrl.jobs.count }
       end
 

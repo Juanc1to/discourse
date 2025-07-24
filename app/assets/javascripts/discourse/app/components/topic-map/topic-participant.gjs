@@ -1,9 +1,12 @@
 import Component from "@glimmer/component";
 import { htmlSafe } from "@ember/template";
+import { gt } from "truth-helpers";
+import PluginOutlet from "discourse/components/plugin-outlet";
 import UserAvatarFlair from "discourse/components/user-avatar-flair";
+import UserLink from "discourse/components/user-link";
+import lazyHash from "discourse/helpers/lazy-hash";
+import { avatarImg } from "discourse/lib/avatar-utils";
 import { userPath } from "discourse/lib/url";
-import { avatarImg } from "discourse-common/lib/avatar-utils";
-import gt from "truth-helpers/helpers/gt";
 
 const addTopicParticipantClassesCallbacks = [];
 
@@ -48,23 +51,29 @@ export default class TopicParticipant extends Component {
   }
 
   get userUrl() {
-    userPath(this.args.participant);
+    return userPath(this.args.participant.username);
   }
 
   <template>
-    <div class={{this.participantClasses}}>
-      <a
-        class={{this.linkClasses}}
-        data-user-card={{@participant.username}}
-        title={{@participant.username}}
-        href={{this.userUrl}}
-      >
-        {{this.avatarImage}}
-        {{#if (gt @participant.post_count 1)}}
-          <span class="post-count">{{@participant.post_count}}</span>
-        {{/if}}
-        <UserAvatarFlair @user={{@participant}} />
-      </a>
-    </div>
+    <PluginOutlet
+      @name="topic-participant"
+      @outletArgs={{lazyHash participant=@participant}}
+    >
+      <div class={{this.participantClasses}}>
+        <UserLink
+          @username={{@participant.username}}
+          @href={{this.userUrl}}
+          class={{this.linkClasses}}
+          title={{@participant.username}}
+        >
+
+          {{this.avatarImage}}
+          {{#if (gt @participant.post_count 1)}}
+            <span class="post-count">{{@participant.post_count}}</span>
+          {{/if}}
+          <UserAvatarFlair @user={{@participant}} />
+        </UserLink>
+      </div>
+    </PluginOutlet>
   </template>
 }

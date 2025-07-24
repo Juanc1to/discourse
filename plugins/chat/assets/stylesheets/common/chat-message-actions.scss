@@ -9,14 +9,8 @@
 }
 
 .chat-message-actions {
-  background-color: var(--secondary);
   border-radius: var(--d-border-radius);
   display: flex;
-
-  .emoji-picker-anchor {
-    position: absolute;
-    height: 34px;
-  }
 
   .link-to-message-btn {
     .d-icon {
@@ -38,7 +32,6 @@
     margin-right: -1px;
     padding: 0.5em 0;
     width: 2.5em;
-    transition: background 0.2s, border-color 0.2s;
 
     > * {
       pointer-events: none;
@@ -79,9 +72,10 @@
       border-left-color: transparent;
       padding: 0.5em 0;
       width: 2.5em;
-      transition: background 0.2s, border-color 0.2s;
-      border-top-left-radius: 0px;
-      border-bottom-left-radius: 0px;
+      transition: var(--d-button-transition);
+      border-radius: var(--d-border-radius);
+      border-top-left-radius: 0;
+      border-bottom-left-radius: 0;
 
       &:focus {
         border-color: var(--primary-300);
@@ -113,12 +107,6 @@
       }
     }
 
-    .select-kit-body {
-      padding: 0.5rem;
-      box-shadow: var(--shadow-card);
-      border: 1px solid var(--primary-300);
-    }
-
     .select-kit-row {
       .texts .name {
         font-size: var(--font-0);
@@ -134,7 +122,6 @@
 
   .chat-message-reaction {
     @include chat-reaction;
-
     align-items: center;
     border-radius: 0;
     border-left-color: transparent;

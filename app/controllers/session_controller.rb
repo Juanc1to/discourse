@@ -5,16 +5,18 @@ class SessionController < ApplicationController
                 only: %i[create forgot_password passkey_challenge passkey_login]
   before_action :rate_limit_login, only: %i[create email_login]
   skip_before_action :redirect_to_login_if_required
+  skip_before_action :redirect_to_profile_if_required
   skip_before_action :preload_json,
                      :check_xhr,
                      only: %i[sso sso_login sso_provider destroy one_time_password]
 
   skip_before_action :check_xhr, only: %i[second_factor_auth_show]
 
-  allow_in_staff_writes_only_mode :create
-  allow_in_staff_writes_only_mode :email_login
+  allow_in_readonly_mode :email_login
+  allow_in_staff_writes_only_mode :create, :forgot_password
 
   ACTIVATE_USER_KEY = "activate_user"
+  FORGOT_PASSWORD_EMAIL_LIMIT_PER_DAY = 6
 
   def csrf
     render json: { csrf: form_authenticity_token }
@@ -71,15 +73,14 @@ class SessionController < ApplicationController
       end
 
       if request.xhr?
-        # for the login modal
-        cookies[:sso_destination_url] = data[:sso_redirect_url]
+        cookies[:destination_url] = data[:sso_redirect_url]
+        render json: success_json.merge(redirect_url: data[:sso_redirect_url])
       else
         redirect_to data[:sso_redirect_url], allow_other_host: true
       end
     elsif result.no_second_factors_enabled?
       if request.xhr?
-        # for the login modal
-        cookies[:sso_destination_url] = result.data[:sso_redirect_url]
+        cookies[:destination_url] = result.data[:sso_redirect_url]
       else
         redirect_to result.data[:sso_redirect_url], allow_other_host: true
       end
@@ -105,22 +106,24 @@ class SessionController < ApplicationController
 
     def become
       raise Discourse::InvalidAccess if Rails.env.production?
-      raise Discourse::ReadOnly if @readonly_mode
 
       if ENV["DISCOURSE_DEV_ALLOW_ANON_TO_IMPERSONATE"] != "1"
-        render(content_type: "text/plain", inline: <<~TEXT)
+        return render plain: <<~TEXT, status: 403
           To enable impersonating any user without typing passwords set the following ENV var
 
           export DISCOURSE_DEV_ALLOW_ANON_TO_IMPERSONATE=1
 
           You can do that in your bashrc of bash profile file or the script you use to launch the web server
         TEXT
-
-        return
       end
 
       user = User.find_by_username(params[:session_id])
-      raise "User #{params[:session_id]} not found" if user.blank?
+
+      if user.blank?
+        return render plain: "User #{params[:session_id]} not found", status: 403
+      elsif !user.active?
+        return render plain: "User #{params[:session_id]} is not active", status: 403
+      end
 
       log_on_user(user)
 
@@ -161,20 +164,26 @@ class SessionController < ApplicationController
 
   def sso_login
     raise Discourse::NotFound unless SiteSetting.enable_discourse_connect
-    raise Discourse::ReadOnly if @readonly_mode && !staff_writes_only_mode?
+    raise Discourse::ReadOnly if @readonly_mode && !@staff_writes_only_mode
 
     params.require(:sso)
     params.require(:sig)
 
     begin
       sso = DiscourseConnect.parse(request.query_string, secure_session: secure_session)
-    rescue DiscourseConnect::ParseError => e
+    rescue DiscourseConnect::PayloadParseError => e
       connect_verbose_warn do
-        "Verbose SSO log: Signature parse error\n\n#{e.message}\n\n#{sso&.diagnostics}"
+        "Verbose SSO log: Payload is not base64\n\n#{e.message}\n\n#{sso&.diagnostics}"
+      end
+
+      return render_sso_error(text: I18n.t("discourse_connect.payload_parse_error"), status: 422)
+    rescue DiscourseConnect::SignatureError => e
+      connect_verbose_warn do
+        "Verbose SSO log: Signature verification failed\n\n#{e.message}\n\n#{sso&.diagnostics}"
       end
 
       # Do NOT pass the error text to the client, it would give them the correct signature
-      return render_sso_error(text: I18n.t("discourse_connect.login_error"), status: 422)
+      return render_sso_error(text: I18n.t("discourse_connect.signature_error"), status: 422)
     end
 
     if !sso.nonce_valid?
@@ -196,7 +205,7 @@ class SessionController < ApplicationController
       invite = validate_invitiation!(sso)
 
       if user = sso.lookup_or_create_user(request.remote_ip)
-        raise Discourse::ReadOnly if staff_writes_only_mode? && !user&.staff?
+        raise Discourse::ReadOnly if @staff_writes_only_mode && !user&.staff?
 
         if user.suspended?
           render_sso_error(text: failed_to_login(user)[:error], status: 403)
@@ -321,13 +330,15 @@ class SessionController < ApplicationController
 
     user = User.find_by_username_or_email(normalized_login_param)
 
-    raise Discourse::ReadOnly if staff_writes_only_mode? && !user&.staff?
+    raise Discourse::ReadOnly if @staff_writes_only_mode && !user&.staff?
 
     rate_limit_second_factor!(user)
 
     if user.present?
-      # If their password is correct
-      unless user.confirm_password?(params[:password])
+      password = params[:password]
+
+      # If their password is incorrect
+      if !user.confirm_password?(password)
         invalid_credentials
         return
       end
@@ -341,6 +352,12 @@ class SessionController < ApplicationController
       # User signed on with username and password, so let's prevent the invite link
       # from being used to log in (if one exists).
       Invite.invalidate_for_email(user.email)
+
+      # User's password has expired so they need to reset it
+      if user.password_expired?(password)
+        render json: { error: "expired", reason: "expired" }
+        return
+      end
     else
       invalid_credentials
       return
@@ -354,7 +371,7 @@ class SessionController < ApplicationController
     return render(json: @second_factor_failure_payload) if !second_factor_auth_result.ok
 
     if user.active && user.email_confirmed?
-      login(user, second_factor_auth_result)
+      login(user, second_factor_auth_result: second_factor_auth_result)
     else
       not_activated(user)
     end
@@ -380,7 +397,7 @@ class SessionController < ApplicationController
     user = User.where(id: security_key.user_id, active: true).first
 
     if user.email_confirmed?
-      login(user, false)
+      login(user, passkey_login: true)
     else
       not_activated(user)
     end
@@ -403,6 +420,7 @@ class SessionController < ApplicationController
         response.merge!(
           second_factor_required: true,
           backup_codes_enabled: matched_user&.backup_codes_enabled?,
+          totp_enabled: matched_user&.totp_enabled?,
         )
       end
 
@@ -426,11 +444,9 @@ class SessionController < ApplicationController
 
   def email_login
     token = params[:token]
-    matched_token = EmailToken.confirmable(token, scope: EmailToken.scopes[:email_login])
-    user = matched_token&.user
+    user = EmailToken.confirmable(token, scope: EmailToken.scopes[:email_login])&.user
 
     check_local_login_allowed(user: user, check_login_via_email: true)
-
     rate_limit_second_factor!(user)
 
     if user.present? && !authenticate_second_factor(user).ok
@@ -438,12 +454,17 @@ class SessionController < ApplicationController
     end
 
     if user = EmailToken.confirm(token, scope: EmailToken.scopes[:email_login])
+      if @staff_writes_only_mode
+        raise Discourse::ReadOnly unless user.staff?
+      elsif @readonly_mode
+        raise Discourse::ReadOnly unless user.admin?
+      end
+
       if login_not_approved_for?(user)
         return render json: login_not_approved
       elsif payload = login_error_check(user)
         return render json: payload
       else
-        raise Discourse::ReadOnly if staff_writes_only_mode? && !user&.staff?
         user.update_timezone_if_missing(params[:timezone])
         log_on_user(user)
         return render json: success_json
@@ -616,15 +637,8 @@ class SessionController < ApplicationController
       end
 
     if user
-      RateLimiter.new(nil, "forgot-password-login-day-#{user.username}", 6, 1.day).performed!
-      email_token =
-        user.email_tokens.create!(email: user.email, scope: EmailToken.scopes[:password_reset])
-      Jobs.enqueue(
-        :critical_user_email,
-        type: "forgot_password",
-        user_id: user.id,
-        email_token: email_token.token,
-      )
+      raise Discourse::ReadOnly if @staff_writes_only_mode && !user.staff?
+      enqueue_password_reset_for_user(user)
     else
       RateLimiter.new(
         nil,
@@ -643,7 +657,7 @@ class SessionController < ApplicationController
 
   def current
     if current_user.present?
-      render_serialized(current_user, CurrentUserSerializer)
+      render_serialized(current_user, CurrentUserSerializer, { login_method: login_method })
     else
       render body: nil, status: 404
     end
@@ -652,30 +666,32 @@ class SessionController < ApplicationController
   def destroy
     redirect_url = params[:return_url].presence || SiteSetting.logout_redirect.presence
 
-    sso = SiteSetting.enable_discourse_connect
-    only_one_authenticator =
-      !SiteSetting.enable_local_logins && Discourse.enabled_authenticators.length == 1
-    if SiteSetting.login_required && (sso || only_one_authenticator)
-      # In this situation visiting most URLs will start the auth process again
-      # Go to the `/login` page to avoid an immediate redirect
-      redirect_url ||= path("/login")
-    end
+    redirect_url ||=
+      if SiteSetting.login_required
+        uses_sso = SiteSetting.enable_discourse_connect
+        has_one_auth = !SiteSetting.enable_local_logins && Discourse.enabled_authenticators.one?
+        path("/login-required") if uses_sso || has_one_auth
+      end
 
     redirect_url ||= path("/")
 
-    event_data = {
+    data = {
       redirect_url: redirect_url,
       user: current_user,
       client_ip: request&.ip,
       user_agent: request&.user_agent,
     }
-    DiscourseEvent.trigger(:before_session_destroy, event_data, **Discourse::Utils::EMPTY_KEYWORDS)
-    redirect_url = event_data[:redirect_url]
+
+    DiscourseEvent.trigger(:before_session_destroy, data)
+
+    # `redirect_url` might have been updated by a `before_session_destroy` listener
+    redirect_url = data[:redirect_url]
 
     reset_session
     log_off_user
+
     if request.xhr?
-      render json: { redirect_url: redirect_url }
+      render json: { redirect_url: }
     else
       redirect_to redirect_url, allow_other_host: true
     end
@@ -789,17 +805,18 @@ class SessionController < ApplicationController
     { error: user.suspended_message, reason: "suspended" }
   end
 
-  def login(user, second_factor_auth_result)
+  def login(user, passkey_login: false, second_factor_auth_result: nil)
     session.delete(ACTIVATE_USER_KEY)
     user.update_timezone_if_missing(params[:timezone])
     log_on_user(user)
 
     if payload = cookies.delete(:sso_payload)
       confirmed_2fa_during_login =
-        (
-          second_factor_auth_result&.ok && second_factor_auth_result.used_2fa_method.present? &&
-            second_factor_auth_result.used_2fa_method != UserSecondFactor.methods[:backup_codes]
-        )
+        passkey_login ||
+          (
+            second_factor_auth_result&.ok && second_factor_auth_result.used_2fa_method.present? &&
+              second_factor_auth_result.used_2fa_method != UserSecondFactor.methods[:backup_codes]
+          )
       sso_provider(payload, confirmed_2fa_during_login)
     else
       render_serialized(user, UserSerializer)
@@ -890,5 +907,24 @@ class SessionController < ApplicationController
     return true if allowed_domains.split("|").include?("*")
 
     allowed_domains.split("|").include?(hostname)
+  end
+
+  def enqueue_password_reset_for_user(user)
+    RateLimiter.new(
+      nil,
+      "forgot-password-login-day-#{user.username}",
+      FORGOT_PASSWORD_EMAIL_LIMIT_PER_DAY,
+      1.day,
+    ).performed!
+
+    email_token =
+      user.email_tokens.create!(email: user.email, scope: EmailToken.scopes[:password_reset])
+
+    Jobs.enqueue(
+      :critical_user_email,
+      type: "forgot_password",
+      user_id: user.id,
+      email_token: email_token.token,
+    )
   end
 end

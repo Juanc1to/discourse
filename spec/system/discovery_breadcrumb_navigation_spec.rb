@@ -3,10 +3,10 @@
 describe "Navigating with breadcrumbs", type: :system do
   let(:discovery) { PageObjects::Pages::Discovery.new }
 
-  fab!(:category1) { Fabricate(:category) }
+  fab!(:category1, :category)
   fab!(:c1_topic) { Fabricate(:topic, category: category1) }
 
-  fab!(:category2) { Fabricate(:category) }
+  fab!(:category2, :category)
   fab!(:c2_topic) { Fabricate(:topic, category: category2) }
   fab!(:category2_child) { Fabricate(:category, parent_category: category2) }
   fab!(:c2_child_topic) { Fabricate(:topic, category: category2_child) }
@@ -61,7 +61,7 @@ describe "Navigating with breadcrumbs", type: :system do
       expect(discovery.topic_list).to have_topic(c1_topic_tagged)
       expect(discovery.topic_list).to have_topics(count: 2)
 
-      expect(discovery.tag_drop).to have_selected_name("all tags")
+      expect(discovery.tag_drop).to have_selected_name("tags")
       discovery.tag_drop.select_row_by_value(tag.name)
 
       expect(discovery.topic_list).to have_topics(count: 1)
@@ -74,8 +74,8 @@ describe "Navigating with breadcrumbs", type: :system do
       expect(discovery.topic_list).to have_topic(c3_topic_tagged)
       expect(discovery.topic_list).to have_topics(count: 2)
 
-      expect(discovery.subcategory_drop).to have_selected_name("none")
-      expect(discovery.tag_drop).to have_selected_name("all tags")
+      expect(discovery.subcategory_drop).to have_selected_name("no subcategories")
+      expect(discovery.tag_drop).to have_selected_name("tags")
       discovery.tag_drop.select_row_by_value(tag.name)
 
       expect(page).to have_current_path(

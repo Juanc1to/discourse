@@ -1,18 +1,6 @@
 .poll-breakdown.modal {
-  .modal-inner-container {
-    max-width: unset;
-    width: 90vw;
-  }
-
   .modal-tabs {
     justify-content: flex-end;
-  }
-
-  .modal-body {
-    display: grid;
-    height: 80vh;
-    grid: auto-flow / 2fr 5fr;
-    padding: 0;
   }
 }
 
@@ -55,7 +43,7 @@
 
 .poll-breakdown-option-color {
   align-self: end;
-  border: 1px solid rgba(0, 0, 0, 0.15);
+  border: 1px solid rgb(0, 0, 0, 0.15);
   grid-column: 1;
   height: 0.6rem;
   justify-self: center;

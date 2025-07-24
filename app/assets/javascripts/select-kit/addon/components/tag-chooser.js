@@ -1,83 +1,106 @@
-import { computed } from "@ember/object";
-import { makeArray } from "discourse-common/lib/helpers";
+import { action, computed } from "@ember/object";
+import { service } from "@ember/service";
+import { attributeBindings, classNames } from "@ember-decorators/component";
+import { bind } from "discourse/lib/decorators";
+import { makeArray } from "discourse/lib/helpers";
 import MultiSelectComponent from "select-kit/components/multi-select";
-import TagsMixin from "select-kit/mixins/tags";
+import {
+  pluginApiIdentifiers,
+  selectKitOptions,
+} from "select-kit/components/select-kit";
+import SelectKitRow from "./select-kit/select-kit-row";
+import TagChooserRow from "./tag-chooser-row";
 
-export default MultiSelectComponent.extend(TagsMixin, {
-  pluginApiIdentifiers: ["tag-chooser"],
-  classNames: ["tag-chooser"],
+@classNames("tag-chooser")
+@attributeBindings("categoryId")
+@selectKitOptions({
+  filterable: true,
+  filterPlaceholder: "tagging.choose_for_topic",
+  limit: null,
+  allowAny: "canCreateTag",
+  maximum: "maximumTagCount",
+})
+@pluginApiIdentifiers("tag-chooser")
+export default class TagChooser extends MultiSelectComponent {
+  @service tagUtils;
 
-  selectKitOptions: {
-    filterable: true,
-    filterPlaceholder: "tagging.choose_for_topic",
-    limit: null,
-    allowAny: "canCreateTag",
-    maximum: "maximumTagCount",
-  },
-
-  modifyComponentForRow(collection, item) {
-    if (this.getValue(item) === this.selectKit.filter && !item.count) {
-      return "select-kit/select-kit-row";
-    }
-
-    return "tag-chooser-row";
-  },
-
-  blockedTags: null,
-  attributeBindings: ["categoryId"],
-  excludeSynonyms: false,
-  excludeHasSynonyms: false,
-
-  canCreateTag: computed("site.can_create_tag", "allowCreate", function () {
-    return this.allowCreate && this.site.can_create_tag;
-  }),
-
-  maximumTagCount: computed(
-    "siteSettings.max_tags_per_topic",
-    "unlimitedTagCount",
-    function () {
-      if (!this.unlimitedTagCount) {
-        return parseInt(
-          this.options.limit ||
-            this.options.maximum ||
-            this.siteSettings.max_tags_per_topic,
-          10
-        );
-      }
-
-      return null;
-    }
-  ),
+  blockedTags = null;
+  excludeSynonyms = false;
+  excludeHasSynonyms = false;
 
   init() {
-    this._super(...arguments);
+    super.init(...arguments);
 
     this.setProperties({
       blockedTags: this.blockedTags || [],
       termMatchesForbidden: false,
       termMatchErrorMessage: null,
     });
-  },
+  }
 
-  value: computed("tags.[]", function () {
+  modifyComponentForRow(collection, item) {
+    if (this.getValue(item) === this.selectKit.filter && !item.count) {
+      return SelectKitRow;
+    }
+
+    return TagChooserRow;
+  }
+
+  @computed("site.can_create_tag", "allowCreate")
+  get canCreateTag() {
+    return this.allowCreate && this.site.can_create_tag;
+  }
+
+  @computed("siteSettings.max_tags_per_topic", "unlimitedTagCount")
+  get maximumTagCount() {
+    if (!this.unlimitedTagCount) {
+      return parseInt(
+        this.options.limit ||
+          this.options.maximum ||
+          this.siteSettings.max_tags_per_topic,
+        10
+      );
+    }
+
+    return null;
+  }
+
+  @computed("tags.[]")
+  get value() {
     return makeArray(this.tags).uniq();
-  }),
+  }
 
-  content: computed("tags.[]", function () {
+  @computed("tags.[]")
+  get content() {
     return makeArray(this.tags)
       .uniq()
       .map((t) => this.defaultItem(t, t));
-  }),
+  }
 
-  actions: {
-    onChange(value, items) {
-      if (this.onChange) {
-        this.onChange(value, items);
-      } else {
-        this.set("tags", value);
-      }
-    },
-  },
+  @action
+  _onChange(value, items) {
+    if (this.onChange) {
+      this.onChange(value, items);
+    } else {
+      this.set("tags", value);
+    }
+  }
+
+  validateCreate(filter, content) {
+    return this.tagUtils.validateCreate(
+      filter,
+      content,
+      this.selectKit.options.maximum,
+      (e) => this.addError(e),
+      this.termMatchesForbidden,
+      (value) => this.getValue(value),
+      this.value
+    );
+  }
+
+  createContentFromInput(input) {
+    return this.tagUtils.createContentFromInput(input);
+  }
 
   search(query) {
     const selectedTags = makeArray(this.tags).filter(Boolean);
@@ -105,31 +128,36 @@ export default MultiSelectComponent.extend(TagsMixin, {
       data.excludeHasSynonyms = true;
     }
 
-    return this.searchTags("/tags/filter/search", data, this._transformJson);
-  },
+    return this.tagUtils.searchTags(
+      "/tags/filter/search",
+      data,
+      this._transformJson
+    );
+  }
 
-  _transformJson(context, json) {
-    if (context.isDestroyed || context.isDestroying) {
+  @bind
+  _transformJson(json) {
+    if (this.isDestroyed || this.isDestroying) {
       return [];
     }
 
     let results = json.results;
 
-    context.setProperties({
+    this.setProperties({
       termMatchesForbidden: json.forbidden ? true : false,
       termMatchErrorMessage: json.forbidden_message,
     });
 
-    if (context.blockedTags) {
+    if (this.blockedTags) {
       results = results.filter((result) => {
-        return !context.blockedTags.includes(result.id);
+        return !this.blockedTags.includes(result.id);
       });
     }
 
-    if (context.siteSettings.tags_sort_alphabetically) {
+    if (this.siteSettings.tags_sort_alphabetically) {
       results = results.sort((a, b) => a.id > b.id);
     }
 
     return results.uniqBy("id");
-  },
-});
+  }
+}

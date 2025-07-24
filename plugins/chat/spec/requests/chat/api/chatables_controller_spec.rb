@@ -1,14 +1,12 @@
 # frozen_string_literal: true
 
-require "rails_helper"
-
 RSpec.describe Chat::Api::ChatablesController do
   before do
     SiteSetting.chat_enabled = true
     SiteSetting.chat_allowed_groups = Group::AUTO_GROUPS[:everyone]
   end
 
-  fab!(:current_user) { Fabricate(:user) }
+  fab!(:current_user, :user)
 
   describe "#index" do
     describe "without chat permissions" do
@@ -29,7 +27,7 @@ RSpec.describe Chat::Api::ChatablesController do
     end
 
     describe "with chat permissions" do
-      fab!(:channel_1) { Fabricate(:chat_channel) }
+      fab!(:channel_1, :chat_channel)
 
       before { channel_1.add(current_user) }
 

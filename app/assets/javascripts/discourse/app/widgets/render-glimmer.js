@@ -1,8 +1,13 @@
+import { hasInternalComponentManager } from "@glimmer/manager";
 import { tracked } from "@glimmer/tracking";
 import { setComponentTemplate } from "@ember/component";
 import templateOnly from "@ember/component/template-only";
 import { assert } from "@ember/debug";
-import { createWidgetFrom } from "discourse/widgets/widget";
+import { getOwnerWithFallback } from "discourse/lib/get-owner";
+import {
+  createWidgetFrom,
+  warnWidgetsDeprecation,
+} from "discourse/widgets/widget";
 
 const INITIAL_CLASSES = Symbol("RENDER_GLIMMER_INITIAL_CLASSES");
 
@@ -94,8 +99,8 @@ export default class RenderGlimmer {
    */
   constructor(widget, renderInto, template, data) {
     assert(
-      "`template` should be a template compiled via `ember-cli-htmlbars`",
-      template.name === "factory"
+      "`template` should be a template compiled via `ember-cli-htmlbars`, or a component",
+      template.name === "factory" || hasInternalComponentManager(template)
     );
     this.renderInto = renderInto;
     if (widget) {
@@ -148,17 +153,22 @@ export default class RenderGlimmer {
   connectComponent() {
     const { element, template } = this;
 
-    const component = templateOnly();
-    component.name = "Widgets/RenderGlimmer";
-    setComponentTemplate(template, component);
+    let component;
+    if (hasInternalComponentManager(template)) {
+      component = template;
+    } else {
+      component = templateOnly();
+      component.name = "Widgets/RenderGlimmer";
+      setComponentTemplate(template, component);
+    }
 
-    this._componentInfo = {
+    this._componentInfo = new ComponentInfo({
       element,
       component,
-      @tracked data: this.data,
+      data: this.data,
       setWrapperElementAttrs: (attrs) =>
         this.updateElementAttrs(element, attrs),
-    };
+    });
 
     this.parentMountWidgetComponent.mountChildComponent(this._componentInfo);
   }
@@ -178,7 +188,21 @@ export default class RenderGlimmer {
   }
 
   get parentMountWidgetComponent() {
-    return this.widget?._findView() || this._emberView;
+    if (this._emberView) {
+      return this._emberView;
+    }
+    // Work up parent widgets until we find one with a _emberView
+    // attribute. `.parentWidget` is the normal way to work up the tree,
+    // but we use `attrs._postCookedWidget` to handle the special case
+    // of widgets rendered inside post-cooked.
+    let widget = this.widget;
+    while (widget) {
+      const component = widget._emberView;
+      if (component) {
+        return component;
+      }
+      widget = widget.parentWidget || widget.attrs._postCookedWidget;
+    }
   }
 }
 
@@ -193,6 +217,20 @@ RenderGlimmer.prototype.type = "Widget";
  * @param template - a glimmer template compiled via ember-cli-htmlbars
  */
 export function registerWidgetShim(name, tagName, template) {
+  if (
+    getOwnerWithFallback(this)?.lookup(`service:site-settings`)
+      ?.deactivate_widgets_rendering
+  ) {
+    warnWidgetsDeprecation(
+      `Widgets are deactivated and shims can't be registered. Your site may not work properly. Affected widget: ${name}.`
+    );
+    return;
+  } else {
+    warnWidgetsDeprecation(
+      `Using \`registerWidgetShim\` is deprecated and will soon stop working. Affected widgetShim: ${name}.`
+    );
+  }
+
   const RenderGlimmerShim = class MyClass extends RenderGlimmer {
     constructor(attrs) {
       super(null, tagName, template, attrs);
@@ -204,8 +242,20 @@ export function registerWidgetShim(name, tagName, template) {
     }
 
     didRenderWidget() {}
+
     willRerenderWidget() {}
   };
 
   createWidgetFrom(RenderGlimmerShim, name, {});
+}
+
+class ComponentInfo {
+  @tracked data;
+  element;
+  component;
+  setWrapperElementAttrs;
+
+  constructor(params) {
+    Object.assign(this, params);
+  }
 }

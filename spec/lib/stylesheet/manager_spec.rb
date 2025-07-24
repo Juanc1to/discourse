@@ -45,6 +45,16 @@ RSpec.describe Stylesheet::Manager do
       end
     end
 
+    it "generates RTL stylesheets for themes with components" do
+      manager = manager(theme.id)
+
+      hrefs = manager.stylesheet_details(:common_theme_rtl, "all")
+      expect(hrefs.size).to eq(2)
+      expect(hrefs.map { |href| href[:theme_id] }).to contain_exactly(theme.id, child_theme.id)
+      expect(hrefs[0][:new_href]).to start_with("/stylesheets/common_theme_rtl_")
+      expect(hrefs[1][:new_href]).to start_with("/stylesheets/common_theme_rtl_")
+    end
+
     it "generates the right links for non-theme targets" do
       manager = manager(nil)
 
@@ -65,11 +75,9 @@ RSpec.describe Stylesheet::Manager do
       css = File.read(builder.stylesheet_fullpath)
       _source_map = File.read(builder.source_map_fullpath)
 
-      expect(css).to match(/\.common/)
       expect(css).to match(/\.desktop/)
 
       # child theme CSS is no longer bundled with main theme
-      expect(css).not_to match(/child_common/)
       expect(css).not_to match(/child_desktop/)
 
       child_theme_builder =
@@ -84,7 +92,6 @@ RSpec.describe Stylesheet::Manager do
       child_css = File.read(child_theme_builder.stylesheet_fullpath)
       _child_source_map = File.read(child_theme_builder.source_map_fullpath)
 
-      expect(child_css).to match(/child_common/)
       expect(child_css).to match(/child_desktop/)
 
       child_theme.set_field(target: :desktop, name: :scss, value: ".nothing{color: green;}")
@@ -483,29 +490,6 @@ RSpec.describe Stylesheet::Manager do
   describe "color_scheme_digest" do
     fab!(:theme)
 
-    it "changes with category background image" do
-      category1 = Fabricate(:category, uploaded_background_id: 123, updated_at: 1.week.ago)
-      category2 = Fabricate(:category, uploaded_background_id: 456, updated_at: 2.days.ago)
-
-      manager = manager(theme.id)
-
-      builder =
-        Stylesheet::Manager::Builder.new(target: :desktop_theme, theme: theme, manager: manager)
-
-      digest1 = builder.color_scheme_digest
-
-      category2.update!(uploaded_background_id: 789, updated_at: 1.day.ago)
-
-      digest2 = builder.color_scheme_digest
-      expect(digest2).to_not eq(digest1)
-
-      category1.update!(uploaded_background_id: nil, updated_at: 5.minutes.ago)
-
-      digest3 = builder.color_scheme_digest
-      expect(digest3).to_not eq(digest2)
-      expect(digest3).to_not eq(digest1)
-    end
-
     it "updates digest when updating a color scheme" do
       scheme = ColorScheme.create_from_base(name: "Neutral", base_scheme_id: "Neutral")
       manager = manager(theme.id)
@@ -632,25 +616,25 @@ RSpec.describe Stylesheet::Manager do
 
   describe "color_scheme_stylesheets" do
     it "returns something by default" do
-      link = manager.color_scheme_stylesheet_link_tag
-      expect(link).to include("color_definitions_base")
+      href = manager.color_scheme_stylesheet_link_tag_href
+      expect(href).to include("color_definitions_base")
     end
 
     it "does not crash when no default theme is set" do
       SiteSetting.default_theme_id = -1
-      link = manager.color_scheme_stylesheet_link_tag
+      href = manager.color_scheme_stylesheet_link_tag_href
 
-      expect(link).to include("color_definitions_base")
+      expect(href).to include("color_definitions_base")
     end
 
     it "loads base scheme when defined scheme id is missing" do
-      link = manager.color_scheme_stylesheet_link_tag(125)
-      expect(link).to include("color_definitions_base")
+      href = manager.color_scheme_stylesheet_link_tag_href(125)
+      expect(href).to include("color_definitions_base")
     end
 
-    it "loads nothing when defined dark scheme id is missing" do
-      link = manager.color_scheme_stylesheet_link_tag(125, "(prefers-color-scheme: dark)")
-      expect(link).to eq("")
+    it "loads nothing when fallback_to_base is false" do
+      href = manager.color_scheme_stylesheet_link_tag_href(125, fallback_to_base: false)
+      expect(href).to eq(nil)
     end
 
     it "uses the correct color scheme from the default site theme" do
@@ -658,8 +642,8 @@ RSpec.describe Stylesheet::Manager do
       theme = Fabricate(:theme, color_scheme_id: cs.id)
       SiteSetting.default_theme_id = theme.id
 
-      link = manager.color_scheme_stylesheet_link_tag()
-      expect(link).to include("/stylesheets/color_definitions_funky_#{cs.id}_")
+      href = manager.color_scheme_stylesheet_link_tag_href
+      expect(href).to include("/stylesheets/color_definitions_funky_#{cs.id}_")
     end
 
     it "uses the correct color scheme when a non-default theme is selected and it uses the base 'Light' scheme" do
@@ -670,8 +654,9 @@ RSpec.describe Stylesheet::Manager do
 
       user_theme = Fabricate(:theme, color_scheme_id: nil)
 
-      link = manager(user_theme.id).color_scheme_stylesheet_link_tag(nil, "all")
-      expect(link).to include("/stylesheets/color_definitions_base_")
+      href =
+        manager(user_theme.id).color_scheme_stylesheet_link_tag_href(nil, fallback_to_base: true)
+      expect(href).to include("/stylesheets/color_definitions_base_")
 
       stylesheet =
         Stylesheet::Manager::Builder.new(
@@ -681,13 +666,13 @@ RSpec.describe Stylesheet::Manager do
         ).compile(force: true)
 
       expect(stylesheet).not_to include("--primary: #CC0000;")
-      expect(stylesheet).to include("--primary: #222222;") # from base scheme
+      expect(stylesheet).to include("--primary: #222;") # from base scheme
     end
 
     it "uses the correct scheme when a valid scheme id is used" do
-      link = manager.color_scheme_stylesheet_link_tag(ColorScheme.first.id)
+      href = manager.color_scheme_stylesheet_link_tag_href(ColorScheme.first.id)
       slug = Slug.for(ColorScheme.first.name) + "_" + ColorScheme.first.id.to_s
-      expect(link).to include("/stylesheets/color_definitions_#{slug}_")
+      expect(href).to include("/stylesheets/color_definitions_#{slug}_")
     end
 
     it "does not fail with a color scheme name containing spaces and special characters" do
@@ -695,8 +680,75 @@ RSpec.describe Stylesheet::Manager do
       theme = Fabricate(:theme, color_scheme_id: cs.id)
       SiteSetting.default_theme_id = theme.id
 
-      link = manager.color_scheme_stylesheet_link_tag
-      expect(link).to include("/stylesheets/color_definitions_funky-bunch_#{cs.id}_")
+      href = manager.color_scheme_stylesheet_link_tag_href
+      expect(href).to include("/stylesheets/color_definitions_funky-bunch_#{cs.id}_")
+    end
+
+    it "generates the dark mode of a color scheme when the dark option is specified" do
+      scheme = ColorScheme.create_from_base(name: "Neutral", base_scheme_id: "Neutral")
+      ColorSchemeRevisor.revise(
+        scheme,
+        colors: [{ name: "primary", hex: "CABFAF", dark_hex: "FAFCAB" }],
+      )
+      theme = Fabricate(:theme)
+      manager = manager(theme.id)
+
+      dark_stylesheet =
+        Stylesheet::Manager::Builder.new(
+          target: :color_definitions,
+          theme: theme,
+          color_scheme: scheme,
+          manager: manager,
+          dark: true,
+        ).compile
+      light_stylesheet =
+        Stylesheet::Manager::Builder.new(
+          target: :color_definitions,
+          theme: theme,
+          color_scheme: scheme,
+          manager: manager,
+        ).compile
+
+      expect(light_stylesheet).to include("--primary: #CABFAF;")
+      expect(light_stylesheet).to include("color_definitions_neutral_#{scheme.id}_#{theme.id}")
+      expect(light_stylesheet).not_to include(
+        "color_definitions_neutral_#{scheme.id}_#{theme.id}_dark",
+      )
+
+      expect(dark_stylesheet).to include("--primary: #FAFCAB;")
+      expect(dark_stylesheet).to include("color_definitions_neutral_#{scheme.id}_#{theme.id}_dark")
+    end
+
+    it "uses the light colors as fallback if the dark scheme doesn't define them" do
+      scheme = ColorScheme.create_from_base(name: "Neutral", base_scheme_id: "Neutral")
+      ColorSchemeRevisor.revise(scheme, colors: [{ name: "primary", hex: "BACFAB", dark_hex: nil }])
+      theme = Fabricate(:theme)
+      manager = manager(theme.id)
+
+      dark_stylesheet =
+        Stylesheet::Manager::Builder.new(
+          target: :color_definitions,
+          theme: theme,
+          color_scheme: scheme,
+          manager: manager,
+          dark: true,
+        ).compile
+      light_stylesheet =
+        Stylesheet::Manager::Builder.new(
+          target: :color_definitions,
+          theme: theme,
+          color_scheme: scheme,
+          manager: manager,
+        ).compile
+
+      expect(light_stylesheet).to include("--primary: #BACFAB;")
+      expect(light_stylesheet).to include("color_definitions_neutral_#{scheme.id}_#{theme.id}")
+      expect(light_stylesheet).not_to include(
+        "color_definitions_neutral_#{scheme.id}_#{theme.id}_dark",
+      )
+
+      expect(dark_stylesheet).to include("--primary: #BACFAB;")
+      expect(dark_stylesheet).to include("color_definitions_neutral_#{scheme.id}_#{theme.id}_dark")
     end
 
     it "updates outputted colors when updating a color scheme" do
@@ -730,23 +782,12 @@ RSpec.describe Stylesheet::Manager do
     end
 
     it "includes updated font definitions" do
-      details1 = manager.color_scheme_stylesheet_details(nil, "all")
+      details1 = manager.color_scheme_stylesheet_details(nil, fallback_to_base: true)
 
       SiteSetting.base_font = DiscourseFonts.fonts[2][:key]
 
-      details2 = manager.color_scheme_stylesheet_details(nil, "all")
+      details2 = manager.color_scheme_stylesheet_details(nil, fallback_to_base: true)
       expect(details1[:new_href]).not_to eq(details2[:new_href])
-    end
-
-    it "calls the preload callback when set" do
-      preload_list = []
-      cs = Fabricate(:color_scheme, name: "Funky")
-      theme = Fabricate(:theme, color_scheme_id: cs.id)
-      preload_callback = ->(href, type) { preload_list << [href, type] }
-
-      expect {
-        manager.color_scheme_stylesheet_link_tag(theme.id, "all", preload_callback)
-      }.to change(preload_list, :size).by(1)
     end
 
     context "with theme colors" do
@@ -820,7 +861,7 @@ RSpec.describe Stylesheet::Manager do
         expect(stylesheet).to include("--child-definition: #fff")
       end
 
-      it "fails gracefully for broken SCSS" do
+      it "fails gracefully in production for broken SCSS" do
         scss = "$test: $missing-var;"
         theme.set_field(target: :common, name: "color_definitions", value: scss)
         theme.save!
@@ -835,7 +876,8 @@ RSpec.describe Stylesheet::Manager do
             manager: manager,
           )
 
-        expect { stylesheet.compile }.not_to raise_error
+        expect(stylesheet.compile).to include("--primary:") # core vals preserved
+        expect(File.read(stylesheet.source_map_fullpath)).to include("/* SCSS compilation error:")
       end
 
       it "child theme SCSS includes the default theme's color scheme variables" do
@@ -852,7 +894,7 @@ RSpec.describe Stylesheet::Manager do
         manager = manager(theme.id)
 
         child_theme_manager =
-          Stylesheet::Manager::Builder.new(target: :desktop_theme, theme: child, manager: manager)
+          Stylesheet::Manager::Builder.new(target: :common_theme, theme: child, manager: manager)
 
         child_theme_manager.compile(force: true)
 
@@ -869,93 +911,95 @@ RSpec.describe Stylesheet::Manager do
         cs = Fabricate(:color_scheme, name: "Grün")
         cs2 = Fabricate(:color_scheme, name: "어두운")
 
-        link = manager.color_scheme_stylesheet_link_tag(cs.id)
-        expect(link).to include("/stylesheets/color_definitions_grun_#{cs.id}_")
-        link2 = manager.color_scheme_stylesheet_link_tag(cs2.id)
-        expect(link2).to include("/stylesheets/color_definitions_scheme_#{cs2.id}_")
+        href = manager.color_scheme_stylesheet_link_tag_href(cs.id)
+        expect(href).to include("/stylesheets/color_definitions_grun_#{cs.id}_")
+        href2 = manager.color_scheme_stylesheet_link_tag_href(cs2.id)
+        expect(href2).to include("/stylesheets/color_definitions_scheme_#{cs2.id}_")
       end
     end
   end
 
   describe ".precompile_css" do
     let(:core_targets) do
-      %w[desktop mobile admin wizard desktop_rtl mobile_rtl admin_rtl wizard_rtl]
+      %w[common desktop mobile admin wizard common_rtl desktop_rtl mobile_rtl admin_rtl wizard_rtl]
     end
 
-    before { STDERR.stubs(:write) }
+    let(:theme_targets) do
+      %i[
+        common_theme
+        desktop_theme
+        mobile_theme
+        common_theme_rtl
+        desktop_theme_rtl
+        mobile_theme_rtl
+      ]
+    end
+
+    before do
+      STDERR.stubs(:write)
+      StylesheetCache.destroy_all
+      default_theme.set_default!
+    end
 
     after do
       STDERR.unstub(:write)
       Stylesheet::Manager.rm_cache_folder
     end
 
-    it "correctly generates precompiled CSS" do
-      scheme1 = ColorScheme.create!(name: "scheme1")
-      scheme2 = ColorScheme.create!(name: "scheme2")
-      theme_targets = %i[desktop_theme mobile_theme]
+    fab!(:scheme1) { ColorScheme.create!(name: "scheme1") }
+    fab!(:scheme2) { ColorScheme.create!(name: "scheme2") }
 
-      Theme.update_all(user_selectable: false)
-      user_theme = Fabricate(:theme, user_selectable: true, color_scheme: scheme1)
-      default_theme = Fabricate(:theme, user_selectable: true, color_scheme: scheme2)
+    fab!(:user_theme) { Fabricate(:theme, user_selectable: true, color_scheme: scheme1) }
+    fab!(:default_theme) { Fabricate(:theme, user_selectable: true, color_scheme: scheme2) }
+    fab!(:child_theme) do
+      Fabricate(:theme).tap do |t|
+        t.component = true
+        t.save!
+        user_theme.add_relative_theme!(:child, t)
+      end
+    end
+    fab!(:child_theme_with_css) do
+      Fabricate(:theme).tap do |t|
+        t.component = true
+        t.set_field(target: :common, name: :scss, value: "body { background: green }")
+        t.save!
+        user_theme.add_relative_theme!(:child, t)
+        default_theme.add_relative_theme!(:child, t)
+      end
+    end
 
-      child_theme =
-        Fabricate(:theme).tap do |t|
-          t.component = true
-          t.save!
-          user_theme.add_relative_theme!(:child, t)
-        end
+    it "generates precompiled CSS - only core" do
+      capture_output(:stderr) { Stylesheet::Manager.precompile_css }
 
-      child_theme_with_css =
-        Fabricate(:theme).tap do |t|
-          t.component = true
+      expect(StylesheetCache.pluck(:target)).to contain_exactly(*core_targets)
+    end
 
-          t.set_field(target: :common, name: :scss, value: "body { background: green }")
-
-          t.save!
-
-          user_theme.add_relative_theme!(:child, t)
-          default_theme.add_relative_theme!(:child, t)
-        end
-
-      default_theme.set_default!
-
-      StylesheetCache.destroy_all
-
-      # only core
-      output = capture_output(:stderr) { Stylesheet::Manager.precompile_css }
-
-      results = StylesheetCache.pluck(:target)
-      expect(results).to contain_exactly(*core_targets)
-
-      StylesheetCache.destroy_all
-
-      # only themes
+    it "generates precompiled CSS - only themes" do
       output = capture_output(:stderr) { Stylesheet::Manager.precompile_theme_css }
 
       # Ensure we force compile each theme only once
-      expect(output.scan(/#{child_theme_with_css.name}/).length).to eq(2)
-      results = StylesheetCache.pluck(:target)
-      expect(results.size).to eq(22) # (3 themes * 2 targets) + 16 color schemes (2 themes * 8 color schemes (7 defaults + 1 theme scheme))
+      expect(output.scan(/#{child_theme_with_css.name}/).length).to eq(2) # ltr/rtl
+      expect(StylesheetCache.count).to eq(42) # (1 theme with rtl/ltr) + 32 color schemes (2 themes * 8 color schemes (7 defaults + 1 theme scheme) * 2 (light and dark mode per scheme)) + 8 Horizon
+    end
 
-      # themes + core
-      Stylesheet::Manager.precompile_css
-      results = StylesheetCache.pluck(:target)
-      expect(results.size).to eq(30) # 11 core targets + 9 theme + 10 color schemes
-
-      theme_targets.each do |tar|
-        expect(
-          results.count { |target| target =~ /^#{tar}_(#{user_theme.id}|#{default_theme.id})$/ },
-        ).to eq(2)
-      end
-
-      Theme.clear_default!
-      StylesheetCache.destroy_all
-
-      # themes + core with no theme set as default
+    it "generates precompiled CSS - core and themes" do
       Stylesheet::Manager.precompile_css
       Stylesheet::Manager.precompile_theme_css
+
       results = StylesheetCache.pluck(:target)
-      expect(results.size).to eq(30) # 11 core targets + 9 theme + 10 color schemes
+      expect(results.size).to eq(52) # 10 core targets + 2 theme (ltr/rtl) + 32 color schemes (light and dark mode per scheme) + 8 Horizon
+
+      expect(results.count { |target| target =~ /^common_theme_/ }).to eq(2) # ltr/rtl
+    end
+
+    it "correctly generates precompiled CSS - core and themes and no default theme" do
+      Theme.clear_default!
+
+      Stylesheet::Manager.precompile_css
+      Stylesheet::Manager.precompile_theme_css
+
+      results = StylesheetCache.pluck(:target)
+      expect(results.size).to eq(70) # 10 core targets + theme rtl/ltr + 32 color schemes (light and dark mode per scheme) + 14 Foundation + 12 Horizon
 
       expect(results).to include("color_definitions_#{scheme1.name}_#{scheme1.id}_#{user_theme.id}")
       expect(results).to include(
@@ -971,40 +1015,31 @@ RSpec.describe Stylesheet::Manager do
       image = file_from_fixtures("logo.png")
       upload = UploadCreator.new(image, "logo.png").create_for(-1)
 
-      scheme = ColorScheme.create!(name: "scheme")
-      theme_targets = %i[desktop_theme mobile_theme]
+      ThemeField.create!(
+        theme_id: default_theme.id,
+        target_id: Theme.targets[:common],
+        name: "logo",
+        value: "",
+        upload_id: upload.id,
+        type_id: ThemeField.types[:theme_upload_var],
+      )
 
-      default_theme =
-        Fabricate(:theme, color_scheme: scheme).tap do |t|
-          field =
-            ThemeField.create!(
-              theme_id: t.id,
-              target_id: Theme.targets[:common],
-              name: "logo",
-              value: "",
-              upload_id: upload.id,
-              type_id: ThemeField.types[:theme_upload_var],
-            )
+      default_theme.set_field(
+        target: :common,
+        name: :scss,
+        value: "body { background: url($logo); border: 3px solid green; }",
+      )
 
-          t.set_field(
-            target: :common,
-            name: :scss,
-            value: "body { background: url($logo); border: 3px solid green; }",
-          )
+      default_theme.save!
 
-          t.save!
-        end
-
-      default_theme.set_default!
       upload.destroy!
-      StylesheetCache.destroy_all
 
       Stylesheet::Manager.precompile_theme_css
 
       manager = manager(default_theme.id)
       theme_builder =
         Stylesheet::Manager::Builder.new(
-          target: :desktop_theme,
+          target: :common_theme,
           theme: default_theme,
           manager: manager,
         )
@@ -1078,7 +1113,7 @@ RSpec.describe Stylesheet::Manager do
 
   describe ".fs_asset_cachebuster" do
     it "returns a number in test/development mode" do
-      expect(Stylesheet::Manager.fs_asset_cachebuster).to match(/\A[0-9]+:[0-9]+\z/)
+      expect(Stylesheet::Manager.fs_asset_cachebuster).to match(/\A.*:[0-9]+\z/)
     end
 
     context "with production mode enabled" do
@@ -1091,7 +1126,7 @@ RSpec.describe Stylesheet::Manager do
 
       it "returns a hash" do
         cachebuster = Stylesheet::Manager.fs_asset_cachebuster
-        expect(cachebuster).to match(/\A[0-9]+:[0-9a-f]{40}\z/)
+        expect(cachebuster).to match(/\A.*:[0-9a-f]{40}\z/)
       end
 
       it "caches the value on the filesystem" do

@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 RSpec.describe StaffActionLogger do
+  let(:long_string) { "Na " * 100_000 + "Batman!" }
   fab!(:admin)
   let(:logger) { described_class.new(admin) }
 
@@ -17,7 +18,7 @@ RSpec.describe StaffActionLogger do
   describe "log_user_deletion" do
     subject(:log_user_deletion) { described_class.new(admin).log_user_deletion(deleted_user) }
 
-    fab!(:deleted_user) { Fabricate(:user) }
+    fab!(:deleted_user, :user)
 
     it "raises an error when user is nil" do
       expect { logger.log_user_deletion(nil) }.to raise_error(Discourse::InvalidParameters)
@@ -49,7 +50,7 @@ RSpec.describe StaffActionLogger do
   describe "log_post_deletion" do
     subject(:log_post_deletion) { described_class.new(admin).log_post_deletion(deleted_post) }
 
-    fab!(:deleted_post) { Fabricate(:post) }
+    fab!(:deleted_post, :post)
 
     it "raises an error when post is nil" do
       expect { logger.log_post_deletion(nil) }.to raise_error(Discourse::InvalidParameters)
@@ -68,6 +69,13 @@ RSpec.describe StaffActionLogger do
         deleted_post.update_columns(user_id: nil)
         log_post_deletion
       }.to change { UserHistory.count }.by(1)
+    end
+
+    it "truncates overly long values" do
+      deleted_post.update!(raw: long_string, skip_validation: true)
+      expect { log_post_deletion }.to change { UserHistory.count }.by(1)
+      log = UserHistory.last
+      expect(log.details.size).to be_between(50_000, 110_000)
     end
   end
 
@@ -90,6 +98,13 @@ RSpec.describe StaffActionLogger do
       it "creates a new UserHistory record" do
         expect { log_topic_delete_recover }.to change { UserHistory.count }.by(1)
       end
+
+      it "truncates overly long values" do
+        Fabricate(:post, topic: topic, skip_validation: true, raw: long_string)
+        expect { log_topic_delete_recover }.to change { UserHistory.count }.by(1)
+        log = UserHistory.last
+        expect(log.details.size).to be_between(50_000, 110_000)
+      end
     end
 
     context "when recovering topic" do
@@ -111,6 +126,13 @@ RSpec.describe StaffActionLogger do
 
       it "creates a new UserHistory record" do
         expect { log_topic_delete_recover }.to change { UserHistory.count }.by(1)
+      end
+
+      it "truncates overly long values" do
+        Fabricate(:post, topic: topic, skip_validation: true, raw: long_string)
+        expect { log_topic_delete_recover }.to change { UserHistory.count }.by(1)
+        log = UserHistory.last
+        expect(log.details.size).to be_between(50_000, 110_000)
       end
     end
   end
@@ -187,12 +209,10 @@ RSpec.describe StaffActionLogger do
   end
 
   describe "log_theme_change" do
+    fab!(:theme)
+
     it "raises an error when params are invalid" do
       expect { logger.log_theme_change(nil, nil) }.to raise_error(Discourse::InvalidParameters)
-    end
-
-    let! :theme do
-      Fabricate(:theme)
     end
 
     it "logs new site customizations" do
@@ -226,15 +246,28 @@ RSpec.describe StaffActionLogger do
         ],
       )
     end
+
+    it "doesn't log values when the json is too large" do
+      old_json = ThemeSerializer.new(theme, root: false).to_json
+
+      theme.set_field(target: :common, name: :scss, value: long_string)
+
+      log_record = logger.log_theme_change(old_json, theme)
+
+      expect(log_record.previous_value).not_to be_present
+      expect(log_record.new_value).not_to be_present
+      expect(log_record.context).to be_present
+    end
   end
 
   describe "log_theme_destroy" do
+    fab!(:theme)
+
     it "raises an error when params are invalid" do
       expect { logger.log_theme_destroy(nil) }.to raise_error(Discourse::InvalidParameters)
     end
 
     it "creates a new UserHistory record" do
-      theme = Fabricate(:theme)
       theme.set_field(target: :common, name: :scss, value: "body{margin: 10px;}")
 
       log_record = logger.log_theme_destroy(theme)
@@ -252,6 +285,15 @@ RSpec.describe StaffActionLogger do
           },
         ],
       )
+    end
+
+    it "doesn't log values when the json is too large" do
+      theme.set_field(target: :common, name: :scss, value: long_string)
+      log_record = logger.log_theme_destroy(theme)
+
+      expect(log_record.previous_value).not_to be_present
+      expect(log_record.new_value).not_to be_present
+      expect(log_record.context).to be_present
     end
   end
 
@@ -398,6 +440,12 @@ RSpec.describe StaffActionLogger do
       expect(logged.custom_type).to eq("clicked_something")
       expect(logged.topic_id).to be === 1234
     end
+
+    it "truncates overly long values" do
+      logged = logger.log_custom(:shower_thought, lyrics: long_string)
+      expect(logged).to be_valid
+      expect(logged.details.size).to be_between(50_000, 110_000)
+    end
   end
 
   describe "log_category_settings_change" do
@@ -488,7 +536,7 @@ RSpec.describe StaffActionLogger do
   end
 
   describe "log_category_deletion" do
-    fab!(:parent_category) { Fabricate(:category) }
+    fab!(:parent_category, :category)
     fab!(:category) { Fabricate(:category, parent_category: parent_category) }
 
     it "raises an error when category is missing" do
@@ -589,7 +637,7 @@ RSpec.describe StaffActionLogger do
       described_class.new(admin).log_check_personal_message(personal_message)
     end
 
-    fab!(:personal_message) { Fabricate(:private_message_topic) }
+    fab!(:personal_message, :private_message_topic)
 
     it "raises an error when topic is nil" do
       expect { logger.log_check_personal_message(nil) }.to raise_error(Discourse::InvalidParameters)
@@ -607,7 +655,7 @@ RSpec.describe StaffActionLogger do
   describe "log_post_approved" do
     subject(:log_post_approved) { described_class.new(admin).log_post_approved(approved_post) }
 
-    fab!(:approved_post) { Fabricate(:post) }
+    fab!(:approved_post, :post)
 
     it "raises an error when post is nil" do
       expect { logger.log_post_approved(nil) }.to raise_error(Discourse::InvalidParameters)
@@ -627,7 +675,7 @@ RSpec.describe StaffActionLogger do
       described_class.new(admin).log_post_rejected(reviewable, DateTime.now)
     end
 
-    fab!(:reviewable) { Fabricate(:reviewable_queued_post) }
+    fab!(:reviewable, :reviewable_queued_post)
 
     it "raises an error when reviewable not supplied" do
       expect { logger.log_post_rejected(nil, DateTime.now) }.to raise_error(
@@ -653,6 +701,15 @@ RSpec.describe StaffActionLogger do
       user_history = UserHistory.last
       expect(user_history.action).to eq(UserHistory.actions[:post_rejected])
       expect(user_history.details).to include(reviewable.payload["raw"])
+    end
+
+    it "truncates overly long values" do
+      reviewable.payload["raw"] = long_string
+      reviewable.save!
+
+      expect { log_post_rejected }.to change { UserHistory.count }.by(1)
+      log = UserHistory.last
+      expect(log.details.size).to be_between(50_000, 110_000)
     end
   end
 

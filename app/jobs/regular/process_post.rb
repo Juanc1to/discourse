@@ -8,7 +8,7 @@ module Jobs
       DistributedMutex.synchronize("process_post_#{args[:post_id]}", validity: 10.minutes) do
         post = Post.find_by(id: args[:post_id])
         # two levels of deletion
-        return unless post.present? && post.topic.present?
+        return if post.blank? || post.topic.blank?
 
         orig_cooked = post.cooked
         recooked = nil
@@ -49,12 +49,15 @@ module Jobs
         if !post.user&.staff? && !post.user&.staged?
           s = post.raw
           s << " #{post.topic.title}" if post.post_number == 1
-          if !args[:bypass_bump] && WordWatcher.new(s).should_flag?
+          word_watcher = WordWatcher.new(s)
+          if !args[:bypass_bump] && word_watcher.should_flag?
+            words = word_watcher.word_matches_for_action?(:flag, all_matches: true)
             PostActionCreator.create(
               Discourse.system_user,
               post,
               :inappropriate,
               reason: :watched_word,
+              context: words.join(","),
             )
           end
         end

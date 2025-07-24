@@ -19,6 +19,11 @@ module("Unit | Utility | preload-store", function (hooks) {
     );
   });
 
+  test("has", function (assert) {
+    assert.false(PreloadStore.has("joker"), "returns false for a missing key");
+    assert.true(PreloadStore.has("bane"), "returns true for an existing key");
+  });
+
   test("remove", function (assert) {
     PreloadStore.remove("bane");
     assert.blank(
@@ -61,8 +66,8 @@ module("Unit | Utility | preload-store", function (hooks) {
   test("returns falsy values without calling finder", async function (assert) {
     PreloadStore.store("falsy", false);
     const result = await PreloadStore.getAndRemove("falsy", () =>
-      assert.ok(false)
+      assert.true(false)
     );
-    assert.strictEqual(result, false);
+    assert.false(result);
   });
 });

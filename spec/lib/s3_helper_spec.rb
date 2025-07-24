@@ -41,10 +41,10 @@ RSpec.describe "S3Helper" do
 
     stub_request(
       :get,
-      "https://bob.s3.#{SiteSetting.s3_region}.amazonaws.com/?lifecycle",
+      "https://bob.s3.dualstack.#{SiteSetting.s3_region}.amazonaws.com/?lifecycle",
     ).to_return(status: 200, body: @lifecycle, headers: {})
 
-    stub_request(:put, "https://bob.s3.#{SiteSetting.s3_region}.amazonaws.com/?lifecycle")
+    stub_request(:put, "https://bob.s3.dualstack.#{SiteSetting.s3_region}.amazonaws.com/?lifecycle")
       .with do |req|
         hash = Hash.from_xml(req.body.to_s)
         rules = hash["LifecycleConfiguration"]["Rule"]
@@ -246,6 +246,158 @@ RSpec.describe "S3Helper" do
       # The S3::Client with `stub_responses: true` includes validation of requests.
       # If the request were invalid, this spec would raise an error
       s3_helper.delete_objects(%w[object/one.txt object/two.txt])
+    end
+  end
+
+  describe "#presigned_url" do
+    let(:s3_helper) { S3Helper.new("test-bucket", "", client: client) }
+
+    it "uses the S3 dualstack endpoint" do
+      expect(s3_helper.presigned_url("test/key.jpeg", method: :get_object)).to include("dualstack")
+    end
+
+    context "for a China S3 region" do
+      before { SiteSetting.s3_region = "cn-northwest-1" }
+
+      it "does not use the S3 dualstack endpoint" do
+        expect(s3_helper.presigned_url("test/key.jpeg", method: :get_object)).not_to include(
+          "dualstack",
+        )
+      end
+    end
+  end
+
+  describe "#presigned_request" do
+    let(:s3_helper) { S3Helper.new("test-bucket", "", client: client) }
+
+    it "uses the S3 dualstack endpoint" do
+      expect(s3_helper.presigned_request("test/key.jpeg", method: :get_object)[0]).to include(
+        "dualstack",
+      )
+    end
+
+    context "for a China S3 region" do
+      before { SiteSetting.s3_region = "cn-northwest-1" }
+
+      it "does not use the S3 dualstack endpoint" do
+        expect(s3_helper.presigned_request("test/key.jpeg", method: :get_object)[0]).not_to include(
+          "dualstack",
+        )
+      end
+    end
+  end
+
+  describe "#create_multipart" do
+    it "creates a multipart upload with the right ACL parameters when `acl` kwarg is set" do
+      s3_helper = S3Helper.new("some-bucket", "", client: client)
+
+      s3_helper.create_multipart(
+        "test_file.tar.gz",
+        "application/gzip",
+        metadata: {
+        },
+        acl: FileStore::S3Store::CANNED_ACL_PUBLIC_READ,
+      )
+
+      create_multipart_upload_request =
+        client.api_requests.find do |api_request|
+          api_request[:operation_name] == :create_multipart_upload
+        end
+
+      expect(create_multipart_upload_request[:context].params[:acl]).to eq(
+        FileStore::S3Store::CANNED_ACL_PUBLIC_READ,
+      )
+    end
+
+    it "creates a multipart upload without ACL parameters when only the `tagging` kwarg is set" do
+      s3_helper = S3Helper.new("some-bucket", "", client: client)
+
+      s3_helper.create_multipart(
+        "test_file.tar.gz",
+        "application/gzip",
+        metadata: {
+        },
+        acl: nil,
+        tagging: "some:tag",
+      )
+
+      create_multipart_upload_request =
+        client.api_requests.find do |api_request|
+          api_request[:operation_name] == :create_multipart_upload
+        end
+
+      expect(create_multipart_upload_request[:context].params[:acl]).to be_nil
+      expect(create_multipart_upload_request[:context].params[:tagging]).to eq("some:tag")
+    end
+  end
+
+  describe "#upsert_tag" do
+    it "correctly updates an existing tag" do
+      s3_helper = S3Helper.new("some-bucket/some-path", "", client: client)
+
+      s3_helper.s3_client.stub_responses(
+        :get_object_tagging,
+        Aws::S3::Types::GetObjectTaggingOutput.new(
+          { tag_set: [{ key: "tag1", value: "value1" }, { key: "tag2", value: "value2" }] },
+        ),
+      )
+
+      s3_helper.upsert_tag("some/key", tag_key: "tag1", tag_value: "newvalue")
+
+      get_object_tagging_request =
+        s3_helper.s3_client.api_requests.find do |api_request|
+          api_request[:operation_name] == :get_object_tagging
+        end
+
+      put_object_tagging_request =
+        s3_helper.s3_client.api_requests.find do |api_request|
+          api_request[:operation_name] == :put_object_tagging
+        end
+
+      expect(get_object_tagging_request[:context].params[:bucket]).to eq("some-bucket")
+      expect(get_object_tagging_request[:context].params[:key]).to eq("some-path/some/key")
+      expect(put_object_tagging_request[:context].params[:bucket]).to eq("some-bucket")
+      expect(put_object_tagging_request[:context].params[:key]).to eq("some-path/some/key")
+
+      expect(put_object_tagging_request[:context].params[:tagging][:tag_set].map(&:to_h)).to eq(
+        [{ key: "tag1", value: "newvalue" }, { key: "tag2", value: "value2" }],
+      )
+    end
+
+    it "correctly adds a new tag" do
+      s3_helper = S3Helper.new("some-bucket/some-path", "", client: client)
+
+      s3_helper.s3_client.stub_responses(
+        :get_object_tagging,
+        Aws::S3::Types::GetObjectTaggingOutput.new(
+          { tag_set: [{ key: "tag1", value: "value1" }, { key: "tag2", value: "value2" }] },
+        ),
+      )
+
+      s3_helper.upsert_tag("some/key", tag_key: "mytag", tag_value: "myvalue")
+
+      get_object_tagging_request =
+        s3_helper.s3_client.api_requests.find do |api_request|
+          api_request[:operation_name] == :get_object_tagging
+        end
+
+      put_object_tagging_request =
+        s3_helper.s3_client.api_requests.find do |api_request|
+          api_request[:operation_name] == :put_object_tagging
+        end
+
+      expect(get_object_tagging_request[:context].params[:bucket]).to eq("some-bucket")
+      expect(get_object_tagging_request[:context].params[:key]).to eq("some-path/some/key")
+      expect(put_object_tagging_request[:context].params[:bucket]).to eq("some-bucket")
+      expect(put_object_tagging_request[:context].params[:key]).to eq("some-path/some/key")
+
+      expect(put_object_tagging_request[:context].params[:tagging][:tag_set].map(&:to_h)).to eq(
+        [
+          { key: "tag1", value: "value1" },
+          { key: "tag2", value: "value2" },
+          { key: "mytag", value: "myvalue" },
+        ],
+      )
     end
   end
 end

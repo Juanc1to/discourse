@@ -1,8 +1,10 @@
 import { concat, fn, hash } from "@ember/helper";
+import didInsert from "@ember/render-modifiers/modifiers/did-insert";
+import { htmlSafe } from "@ember/template";
+import { or } from "truth-helpers";
 import DButton from "discourse/components/d-button";
 import concatClass from "discourse/helpers/concat-class";
-import icon from "discourse-common/helpers/d-icon";
-import or from "truth-helpers/helpers/or";
+import icon from "discourse/helpers/d-icon";
 
 const DDefaultToast = <template>
   <div
@@ -12,6 +14,12 @@ const DDefaultToast = <template>
     }}
     ...attributes
   >
+    {{#if @showProgressBar}}
+      <div
+        class="fk-d-default-toast__progress-bar"
+        {{didInsert @onRegisterProgressBar}}
+      ></div>
+    {{/if}}
     {{#if @data.icon}}
       <div class="fk-d-default-toast__icon-container">
         {{icon @data.icon}}
@@ -26,7 +34,11 @@ const DDefaultToast = <template>
         {{/if}}
         {{#if @data.message}}
           <div class="fk-d-default-toast__message">
-            {{@data.message}}
+            {{#if @data.isHtmlMessage}}
+              {{htmlSafe @data.message}}
+            {{else}}
+              {{@data.message}}
+            {{/if}}
           </div>
         {{/if}}
       </div>
@@ -48,7 +60,7 @@ const DDefaultToast = <template>
       {{/if}}
     </div>
     <div class="fk-d-default-toast__close-container">
-      <DButton class="btn-flat" @icon="times" @action={{@close}} />
+      <DButton class="btn-transparent" @icon="xmark" @action={{@close}} />
     </div>
   </div>
 </template>;

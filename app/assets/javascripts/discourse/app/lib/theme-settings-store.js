@@ -1,15 +1,11 @@
 import { get } from "@ember/object";
-import { cloneJSON } from "discourse-common/lib/object";
+import { cloneJSON } from "discourse/lib/object";
 
 const originalSettings = {};
 const settings = {};
 
-export function registerSettings(
-  themeId,
-  settingsObject,
-  { force = false } = {}
-) {
-  if (settings[themeId] && !force) {
+export function registerSettings(themeId, settingsObject) {
+  if (settings[themeId]) {
     return;
   }
   originalSettings[themeId] = cloneJSON(settingsObject);

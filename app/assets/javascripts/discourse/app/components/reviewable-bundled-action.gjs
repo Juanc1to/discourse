@@ -1,7 +1,7 @@
 import Component from "@glimmer/component";
 import { hash } from "@ember/helper";
 import { action } from "@ember/object";
-import { inject as service } from "@ember/service";
+import { service } from "@ember/service";
 import { dasherize } from "@ember/string";
 import DButton from "discourse/components/d-button";
 import concatClass from "discourse/helpers/concat-class";
@@ -26,6 +26,20 @@ export default class ReviewableBundledAction extends Component {
     return `${vertical}-${horizontal}`;
   }
 
+  get buttonClass() {
+    const buttonIdentifier = dasherize(
+      this.first.button_class || this.first.id
+    );
+
+    if (buttonIdentifier === "reject-post") {
+      return "btn-danger";
+    } else if (buttonIdentifier === "approve-post") {
+      return "btn-success";
+    } else {
+      return "btn-default";
+    }
+  }
+
   @action
   perform(id) {
     if (id) {
@@ -47,6 +61,8 @@ export default class ReviewableBundledAction extends Component {
           disabled=@reviewableUpdating
           placement=this.placement
           translatedNone=@bundle.label
+          customStyle=true
+          btnCustomClasses=this.buttonClass
         }}
         class={{concatClass
           "reviewable-action-dropdown"
@@ -61,9 +77,10 @@ export default class ReviewableBundledAction extends Component {
         @translatedLabel={{this.first.label}}
         @disabled={{@reviewableUpdating}}
         class={{concatClass
-          "btn-default reviewable-action"
+          "reviewable-action"
           (dasherize this.first.id)
           this.first.button_class
+          this.buttonClass
         }}
       />
     {{/if}}

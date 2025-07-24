@@ -45,6 +45,7 @@ class TopicList
     :shared_drafts,
     :category,
     :publish_read_state,
+    :filter_option_info,
   )
 
   def initialize(filter, current_user, topics, opts = nil)
@@ -55,7 +56,7 @@ class TopicList
 
     @category = Category.find_by(id: @opts[:category_id]) if @opts[:category]
 
-    @tags = Tag.where(id: @opts[:tags]).all if @opts[:tags]
+    @tags = Tag.where(id: @opts[:tag_ids]).all if @opts[:tag_ids].present?
 
     @publish_read_state = !!@opts[:publish_read_state]
   end
@@ -77,7 +78,7 @@ class TopicList
 
   def categories
     @categories ||=
-      topics.map { |t| [t.category&.parent_category, t.category] }.uniq.flatten.compact
+      topics.map { |t| [t.category&.parent_category, t.category] }.flatten.uniq.compact
   end
 
   def load_topics
@@ -138,7 +139,17 @@ class TopicList
       { category: :parent_category },
     ]
 
-    topic_preloader_associations.concat(DiscoursePluginRegistry.topic_preloader_associations.to_a)
+    topic_preloader_associations << :topic_localizations if SiteSetting.content_localization_enabled
+
+    DiscoursePluginRegistry.topic_preloader_associations.each do |a|
+      fields = a[:fields]
+      condition = a[:condition]
+      if condition.present?
+        topic_preloader_associations << fields if condition.present? && condition.call
+      else
+        topic_preloader_associations << fields
+      end
+    end
 
     ActiveRecord::Associations::Preloader.new(
       records: @topics,

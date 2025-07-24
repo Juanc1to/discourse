@@ -16,6 +16,8 @@ RSpec.describe SessionController do
     end
   end
 
+  before { SiteSetting.hide_email_address_taken = false }
+
   describe "#email_login_info" do
     let(:email_token) do
       Fabricate(:email_token, user: user, scope: EmailToken.scopes[:email_login])
@@ -99,6 +101,7 @@ RSpec.describe SessionController do
           expect(response_body_parsed["can_login"]).to eq(true)
           expect(response_body_parsed["second_factor_required"]).to eq(true)
           expect(response_body_parsed["backup_codes_enabled"]).to eq(true)
+          expect(response_body_parsed["totp_enabled"]).to eq(true)
         end
       end
 
@@ -128,15 +131,35 @@ RSpec.describe SessionController do
   end
 
   describe "#email_login" do
-    let(:email_token) do
-      Fabricate(:email_token, user: user, scope: EmailToken.scopes[:email_login])
-    end
+    let(:email_token) { Fabricate(:email_token, user:, scope: EmailToken.scopes[:email_login]) }
 
     before { SiteSetting.enable_local_logins_via_email = true }
 
-    context "when in staff writes only mode" do
-      use_redis_snapshotting
+    context "when in readonly mode" do
+      before { Discourse.enable_readonly_mode }
 
+      it "allows admins to login" do
+        user.update!(admin: true)
+        post "/session/email-login/#{email_token.token}.json"
+        expect(response.status).to eq(200)
+        expect(session[:current_user_id]).to eq(user.id)
+      end
+
+      it "does not allow moderators to login" do
+        user.update!(moderator: true)
+        post "/session/email-login/#{email_token.token}.json"
+        expect(response.status).to eq(503)
+        expect(session[:current_user_id]).to eq(nil)
+      end
+
+      it "does not allow regular users to login" do
+        post "/session/email-login/#{email_token.token}.json"
+        expect(response.status).to eq(503)
+        expect(session[:current_user_id]).to eq(nil)
+      end
+    end
+
+    context "when in staff writes only mode" do
       before { Discourse.enable_readonly_mode(Discourse::STAFF_WRITES_ONLY_MODE_KEY) }
 
       it "allows admins to login" do
@@ -146,7 +169,14 @@ RSpec.describe SessionController do
         expect(session[:current_user_id]).to eq(user.id)
       end
 
-      it "does not allow other users to login" do
+      it "allows moderators to login" do
+        user.update!(moderator: true)
+        post "/session/email-login/#{email_token.token}.json"
+        expect(response.status).to eq(200)
+        expect(session[:current_user_id]).to eq(user.id)
+      end
+
+      it "does not allow regular users to login" do
         post "/session/email-login/#{email_token.token}.json"
         expect(response.status).to eq(503)
         expect(session[:current_user_id]).to eq(nil)
@@ -521,20 +551,44 @@ RSpec.describe SessionController do
   describe "#become" do
     let!(:user) { Fabricate(:user) }
 
-    it "does not work when in production mode" do
-      Rails.env.stubs(:production?).returns(true)
-      get "/session/#{user.username}/become.json"
+    describe "when in production mode" do
+      before { Rails.env.stubs(:production?).returns(true) }
 
-      expect(response.status).to eq(403)
-      expect(response.parsed_body["error_type"]).to eq("invalid_access")
-      expect(session[:current_user_id]).to be_blank
+      it "does not work" do
+        get "/session/#{user.username}/become"
+
+        expect(response.status).to eq(403)
+        expect(session[:current_user_id]).to be_blank
+      end
     end
 
-    it "works in development mode" do
-      Rails.env.stubs(:development?).returns(true)
-      get "/session/#{user.username}/become.json"
-      expect(response).to be_redirect
-      expect(session[:current_user_id]).to eq(user.id)
+    describe "when in development mode" do
+      before { Rails.env.stubs(:development?).returns(true) }
+
+      it "works" do
+        get "/session/#{user.username}/become"
+
+        expect(response).to be_redirect
+        expect(session[:current_user_id]).to eq(user.id)
+      end
+
+      it "raises an error if the user is not found" do
+        get "/session/invalid_user/become"
+
+        expect(response.status).to eq(403)
+        expect(response.body).to include("User invalid_user not found")
+        expect(session[:current_user_id]).to be_blank
+      end
+
+      it "raises an error if the user is not active" do
+        user.update!(active: false)
+
+        get "/session/#{user.username}/become"
+
+        expect(response.status).to eq(403)
+        expect(response.body).to include("User #{user.username} is not active")
+        expect(session[:current_user_id]).to be_blank
+      end
     end
   end
 
@@ -579,8 +633,6 @@ RSpec.describe SessionController do
     end
 
     context "when in staff writes only mode" do
-      use_redis_snapshotting
-
       before { Discourse.enable_readonly_mode(Discourse::STAFF_WRITES_ONLY_MODE_KEY) }
 
       it "allows staff to login" do
@@ -945,7 +997,7 @@ RSpec.describe SessionController do
           get "/session/sso_login", params: Rack::Utils.parse_query(sso.payload), headers: headers
 
           expect(response.status).to eq(403)
-          expect(response.parsed_body).to include(I18n.t("discourse_connect.account_not_approved"))
+          expect(response.body).to include(I18n.t("discourse_connect.account_not_approved"))
         end.to change { User.count }.by(1)
 
         logged_on_user = Discourse.current_user_provider.new(request.env).current_user
@@ -1123,7 +1175,7 @@ RSpec.describe SessionController do
         login_with_sso_and_invite
 
         expect(response.status).to eq(403)
-        expect(response.parsed_body).to include(I18n.t("discourse_connect.account_not_approved"))
+        expect(response.body).to include(I18n.t("discourse_connect.account_not_approved"))
         expect(invite.reload.redeemed?).to eq(true)
 
         user = User.find_by_email("bob@bob.com")
@@ -1268,6 +1320,23 @@ RSpec.describe SessionController do
       end
     end
 
+    it "returns the correct error code for invalid payload" do
+      sso = get_sso("/hello/world")
+      sso.external_id = "997"
+      sso.sso_url = "http://somewhere.over.com/sso_login"
+
+      params = Rack::Utils.parse_query(sso.payload)
+      params["sso"] = "#{params["sso"]}%3C"
+      params["sig"] = sso.sign(params["sso"])
+
+      get "/session/sso_login", params: params, headers: headers
+      expect(response.status).to eq(422)
+      expect(response.body).to include(I18n.t("discourse_connect.payload_parse_error"))
+
+      logged_on_user = Discourse.current_user_provider.new(request.env).current_user
+      expect(logged_on_user).to eq(nil)
+    end
+
     it "returns the correct error code for invalid signature" do
       sso = get_sso("/hello/world")
       sso.external_id = "997"
@@ -1278,6 +1347,7 @@ RSpec.describe SessionController do
           params: correct_params.merge(sig: "thisisnotthesigyouarelookingfor"),
           headers: headers
       expect(response.status).to eq(422)
+      expect(response.body).to include(I18n.t("discourse_connect.signature_error"))
       expect(response.body).not_to include(correct_params["sig"]) # Check we didn't send the real sig back to the client
       logged_on_user = Discourse.current_user_provider.new(request.env).current_user
       expect(logged_on_user).to eq(nil)
@@ -1347,8 +1417,6 @@ RSpec.describe SessionController do
     end
 
     context "when in readonly mode" do
-      use_redis_snapshotting
-
       before { Discourse.enable_readonly_mode }
 
       it "disallows requests" do
@@ -1416,7 +1484,7 @@ RSpec.describe SessionController do
              xhr: true,
              headers: headers
 
-        location = response.cookies["sso_destination_url"]
+        location = response.cookies["destination_url"]
         # javascript code will handle redirection of user to return_sso_url
         expect(location).to match(%r{^http://somewhere.over.rainbow/sso})
 
@@ -1561,73 +1629,29 @@ RSpec.describe SessionController do
       end
 
       it "handles non local content correctly" do
-        SiteSetting.avatar_sizes = "100|49"
         setup_s3
         SiteSetting.s3_cdn_url = "http://cdn.com"
 
-        stub_request(:any, /s3-upload-bucket.s3.dualstack.us-west-1.amazonaws.com/).to_return(
-          status: 200,
-          body: "",
-          headers: {
-            referer: "fgdfds",
-          },
-        )
-
-        @user.create_user_avatar!
-        upload =
-          Fabricate(
-            :upload,
-            url: "//s3-upload-bucket.s3.dualstack.us-west-1.amazonaws.com/something",
-          )
-
-        Fabricate(
-          :optimized_image,
-          sha1: SecureRandom.hex << "A" * 8,
-          upload: upload,
-          width: 98,
-          height: 98,
-          url: "//s3-upload-bucket.s3.amazonaws.com/something/else",
-        )
-
-        @user.update_columns(uploaded_avatar_id: upload.id)
-
-        upload1 = Fabricate(:upload_s3)
-        upload2 = Fabricate(:upload_s3)
-
+        @user.update!(uploaded_avatar: Fabricate(:upload_s3))
         @user.user_profile.update!(
-          profile_background_upload: upload1,
-          card_background_upload: upload2,
+          profile_background_upload: Fabricate(:upload_s3),
+          card_background_upload: Fabricate(:upload_s3),
         )
-
-        @user.reload
-        @user.user_avatar.reload
-        @user.user_profile.reload
 
         sign_in(@user)
-
-        stub_request(:get, "http://cdn.com/something/else").to_return(
-          body: lambda { |request| File.new(Rails.root + "spec/fixtures/images/logo.png") },
-        )
 
         get "/session/sso_provider",
             params: Rack::Utils.parse_query(@sso.payload("secretForOverRainbow"))
 
         location = response.header["Location"]
-        # javascript code will handle redirection of user to return_sso_url
         expect(location).to match(%r{^http://somewhere.over.rainbow/sso})
 
         payload = location.split("?")[1]
         sso2 = DiscourseConnectProvider.parse(payload)
 
-        expect(sso2.avatar_url.blank?).to_not eq(true)
-        expect(sso2.profile_background_url.blank?).to_not eq(true)
-        expect(sso2.card_background_url.blank?).to_not eq(true)
-
-        expect(sso2.avatar_url).to start_with("#{SiteSetting.s3_cdn_url}/original")
+        expect(sso2.avatar_url).to start_with(SiteSetting.s3_cdn_url)
         expect(sso2.profile_background_url).to start_with(SiteSetting.s3_cdn_url)
         expect(sso2.card_background_url).to start_with(SiteSetting.s3_cdn_url)
-        expect(sso2.confirmed_2fa).to eq(nil)
-        expect(sso2.no_2fa_methods).to eq(nil)
       end
 
       it "successfully logs out and redirects user to return_sso_url when the user is logged in" do
@@ -1783,9 +1807,9 @@ RSpec.describe SessionController do
                },
                xhr: true,
                headers: headers
-          expect(response.status).to eq(204)
+          expect(response.status).to eq(200)
           # the frontend will take care of actually redirecting the user
-          redirect_url = response.cookies["sso_destination_url"]
+          redirect_url = response.cookies["destination_url"]
           expect(redirect_url).to start_with("http://somewhere.over.rainbow/sso?sso=")
           sso = DiscourseConnectProvider.parse(URI(redirect_url).query)
           expect(sso.confirmed_2fa).to eq(true)
@@ -1807,7 +1831,7 @@ RSpec.describe SessionController do
                },
                xhr: true,
                headers: headers
-          redirect_url = response.cookies["sso_destination_url"]
+          redirect_url = response.cookies["destination_url"]
           expect(redirect_url).to start_with("http://somewhere.over.rainbow/sso?sso=")
           sso = DiscourseConnectProvider.parse(URI(redirect_url).query)
           expect(sso.confirmed_2fa).to eq(nil)
@@ -1821,8 +1845,6 @@ RSpec.describe SessionController do
 
   describe "#create" do
     context "when read only mode" do
-      use_redis_snapshotting
-
       before do
         Discourse.enable_readonly_mode
         EmailToken.confirm(email_token.token)
@@ -1841,8 +1863,6 @@ RSpec.describe SessionController do
     end
 
     context "when in staff writes only mode" do
-      use_redis_snapshotting
-
       before do
         Discourse.enable_readonly_mode(Discourse::STAFF_WRITES_ONLY_MODE_KEY)
         EmailToken.confirm(email_token.token)
@@ -1973,7 +1993,7 @@ RSpec.describe SessionController do
         end
       end
 
-      describe "success by username" do
+      describe "success by username and password" do
         it "logs in correctly" do
           events =
             DiscourseEvent.track_events do
@@ -1991,6 +2011,7 @@ RSpec.describe SessionController do
 
           expect(session[:current_user_id]).to eq(user.id)
           expect(user.user_auth_tokens.count).to eq(1)
+          expect(user.user_auth_tokens.last.authenticated_with_oauth).to be false
           unhashed_token = decrypt_auth_cookie(cookies[:_t])[:token]
           expect(UserAuthToken.hash_token(unhashed_token)).to eq(
             user.user_auth_tokens.first.auth_token,
@@ -2009,6 +2030,20 @@ RSpec.describe SessionController do
             expect(response.parsed_body["error"]).not_to be_present
             expect(user.reload.user_option.timezone).to eq("Australia/Melbourne")
           end
+        end
+      end
+
+      describe "when user's password has been marked as expired" do
+        before { RateLimiter.enable }
+
+        it "should return an error response code with the right error message" do
+          UserPasswordExpirer.expire_user_password(user)
+          post "/session.json", params: { login: user.username, password: "myawesomepassword" }
+
+          expect(response.status).to eq(200)
+          expect(response.parsed_body["error"]).to eq("expired")
+          expect(response.parsed_body["reason"]).to eq("expired")
+          expect(session[:current_user_id]).to eq(nil)
         end
       end
 
@@ -2400,8 +2435,6 @@ RSpec.describe SessionController do
     context "when rate limited" do
       before { RateLimiter.enable }
 
-      use_redis_snapshotting
-
       it "rate limits login" do
         SiteSetting.max_logins_per_ip_per_hour = 2
         EmailToken.confirm(email_token.token)
@@ -2511,7 +2544,7 @@ RSpec.describe SessionController do
       expect(response.parsed_body["redirect_url"]).to eq("/")
     end
 
-    it "redirects to /login when SSO and login_required" do
+    it "redirects to /login-required when SSO and login_required" do
       SiteSetting.discourse_connect_url = "https://example.com/sso"
       SiteSetting.enable_discourse_connect = true
 
@@ -2526,7 +2559,7 @@ RSpec.describe SessionController do
       delete "/session/#{user.username}.json", xhr: true
       expect(response.status).to eq(200)
       expect(response.parsed_body["error"]).not_to be_present
-      expect(response.parsed_body["redirect_url"]).to eq("/login")
+      expect(response.parsed_body["redirect_url"]).to eq("/login-required")
     end
 
     it "allows plugins to manipulate redirect URL" do
@@ -2692,8 +2725,6 @@ RSpec.describe SessionController do
     describe "rate limiting" do
       before { RateLimiter.enable }
 
-      use_redis_snapshotting
-
       it "should correctly rate limits" do
         user = Fabricate(:user)
 
@@ -2818,6 +2849,23 @@ RSpec.describe SessionController do
 
       it "enqueues no email" do
         post "/session/forgot_password.json", params: { login: staged.username }
+        expect(Jobs::CriticalUserEmail.jobs.size).to eq(0)
+      end
+    end
+
+    context "when in staff writes only mode" do
+      before { Discourse.enable_readonly_mode(Discourse::STAFF_WRITES_ONLY_MODE_KEY) }
+
+      it "allows staff to forget their password" do
+        post "/session/forgot_password.json", params: { login: admin.username }
+        expect(response.status).to eq(200)
+        expect(response.parsed_body["error"]).not_to be_present
+        expect(Jobs::CriticalUserEmail.jobs.size).to eq(1)
+      end
+
+      it "doesn't allow non-staff to forget their password" do
+        post "/session/forgot_password.json", params: { login: user.username }
+        expect(response.status).to eq(503)
         expect(Jobs::CriticalUserEmail.jobs.size).to eq(0)
       end
     end
@@ -3191,6 +3239,22 @@ RSpec.describe SessionController do
           expect(session[:current_user_id]).to eq(nil)
         end
 
+        it "fails when discourse connect is enabled" do
+          SiteSetting.discourse_connect_url = "https://www.example.com/sso"
+          SiteSetting.enable_discourse_connect = true
+          simulate_localhost_passkey_challenge
+          user.activate
+          user.create_or_fetch_secure_identifier
+          post "/session/passkey/auth.json",
+               params: {
+                 publicKeyCredential:
+                   valid_passkey_auth_data.merge(
+                     { userHandle: Base64.strict_encode64(user.secure_identifier) },
+                   ),
+               }
+          expect(response.status).to eq(403)
+        end
+
         it "logs the user in" do
           simulate_localhost_passkey_challenge
           user.activate
@@ -3206,6 +3270,43 @@ RSpec.describe SessionController do
           expect(response.parsed_body["error"]).not_to be_present
 
           expect(session[:current_user_id]).to eq(user.id)
+        end
+
+        context "with a valid discourse connect provider" do
+          before do
+            sso = DiscourseConnectBase.new
+            sso.nonce = "mynonce"
+            sso.sso_secret = "topsecret"
+            sso.return_sso_url = "http://somewhere.over.rainbow/sso"
+            cookies[:sso_payload] = sso.payload
+
+            provider_uid = 12_345
+            UserAssociatedAccount.create!(
+              provider_name: "google_oauth2",
+              provider_uid: provider_uid,
+              user: user,
+            )
+
+            SiteSetting.enable_discourse_connect_provider = true
+            SiteSetting.discourse_connect_secret = sso.sso_secret
+            SiteSetting.discourse_connect_provider_secrets =
+              "somewhere.over.rainbow|#{sso.sso_secret}"
+          end
+
+          it "logs the user in" do
+            simulate_localhost_passkey_challenge
+            user.activate
+            user.create_or_fetch_secure_identifier
+            post "/session/passkey/auth.json",
+                 params: {
+                   publicKeyCredential:
+                     valid_passkey_auth_data.merge(
+                       { userHandle: Base64.strict_encode64(user.secure_identifier) },
+                     ),
+                 }
+            expect(response.status).to eq(302)
+            expect(response.location).to start_with("http://somewhere.over.rainbow/sso")
+          end
         end
       end
     end

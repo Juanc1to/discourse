@@ -14,9 +14,10 @@ RSpec.describe ApplicationController do
       expect(response.headers["Cache-Control"]).to eq("no-cache, no-store")
     end
 
-    it "should redirect to login normally" do
+    it "should not redirect to login" do
       get "/"
-      expect(response).to redirect_to("/login")
+      expect(response).not_to redirect_to("/login")
+      expect(response.status).to eq(200)
     end
 
     it "should redirect to SSO if enabled" do
@@ -27,10 +28,11 @@ RSpec.describe ApplicationController do
     end
 
     it "should redirect to authenticator if only one, and local logins disabled" do
-      # Local logins and google enabled, direct to login UI
+      # Local logins and google enabled, show login UI
       SiteSetting.enable_google_oauth2_logins = true
       get "/"
-      expect(response).to redirect_to("/login")
+      expect(response).not_to redirect_to("/login")
+      expect(response.status).to eq(200)
 
       # Only google enabled, login immediately
       SiteSetting.enable_local_logins = false
@@ -40,7 +42,8 @@ RSpec.describe ApplicationController do
       # Google and GitHub enabled, direct to login UI
       SiteSetting.enable_github_logins = true
       get "/"
-      expect(response).to redirect_to("/login")
+      expect(response).not_to redirect_to("/login")
+      expect(response.status).to eq(200)
     end
 
     it "should not redirect to SSO when auth_immediately is disabled" do
@@ -49,7 +52,8 @@ RSpec.describe ApplicationController do
       SiteSetting.enable_discourse_connect = true
 
       get "/"
-      expect(response).to redirect_to("/login")
+      expect(response).not_to redirect_to("/login")
+      expect(response.status).to eq(200)
     end
 
     it "should not redirect to authenticator when auth_immediately is disabled" do
@@ -58,7 +62,8 @@ RSpec.describe ApplicationController do
       SiteSetting.enable_local_logins = false
 
       get "/"
-      expect(response).to redirect_to("/login")
+      expect(response).not_to redirect_to("/login")
+      expect(response.status).to eq(200)
     end
 
     context "with omniauth in test mode" do
@@ -142,6 +147,15 @@ RSpec.describe ApplicationController do
       expect(response).to redirect_to("/u/#{admin.username}/preferences/second-factor")
     end
 
+    it "should properly redirect admins when enforce_second_factor is 'all' in subfolder" do
+      set_subfolder "/forum"
+      SiteSetting.enforce_second_factor = "all"
+      sign_in(admin)
+
+      get "/"
+      expect(response).to redirect_to("/forum/u/#{admin.username}/preferences/second-factor")
+    end
+
     it "should redirect users when enforce_second_factor is 'all'" do
       SiteSetting.enforce_second_factor = "all"
       sign_in(user)
@@ -150,9 +164,28 @@ RSpec.describe ApplicationController do
       expect(response).to redirect_to("/u/#{user.username}/preferences/second-factor")
     end
 
+    it "should redirect users when enforce_second_factor is 'all' and authenticated via oauth" do
+      SiteSetting.enforce_second_factor = "all"
+      sign_in(user)
+      user.user_auth_tokens.last.update(authenticated_with_oauth: true)
+
+      get "/"
+      expect(response).to redirect_to("/u/#{user.username}/preferences/second-factor")
+    end
+
+    it "should not redirect users when enforce_second_factor is 'all', authenticated via oauth but enforce_second_factor_on_external_auth is false" do
+      SiteSetting.enforce_second_factor = "all"
+      SiteSetting.enforce_second_factor_on_external_auth = false
+      sign_in(user)
+      user.user_auth_tokens.last.update(authenticated_with_oauth: true)
+
+      get "/"
+      expect(response.status).to eq(200)
+    end
+
     it "should not redirect anonymous users when enforce_second_factor is 'all'" do
       SiteSetting.enforce_second_factor = "all"
-      SiteSetting.allow_anonymous_posting = true
+      SiteSetting.allow_anonymous_mode = true
 
       sign_in(user)
 
@@ -237,14 +270,51 @@ RSpec.describe ApplicationController do
     end
   end
 
-  describe "invalid request params" do
-    before do
-      @old_logger = Rails.logger
-      @logs = StringIO.new
-      Rails.logger = Logger.new(@logs)
+  describe "#redirect_to_profile_if_required" do
+    fab!(:user)
+
+    before { sign_in(user) }
+
+    context "when the user is missing required custom fields" do
+      before do
+        Fabricate(:user_field, requirement: "for_all_users")
+        UserRequiredFieldsVersion.create!
+      end
+
+      it "redirects the user to the profile preferences" do
+        get "/hot"
+        expect(response).to redirect_to("/u/#{user.username}/preferences/profile")
+      end
+
+      it "only logs user history once per day" do
+        expect do
+          RateLimiter.enable
+          get "/hot"
+          get "/hot"
+        end.to change { UserHistory.count }.by(1)
+      end
     end
 
-    after { Rails.logger = @old_logger }
+    context "when the user has filled up all required custom fields" do
+      before do
+        Fabricate(:user_field, requirement: "for_all_users")
+        UserRequiredFieldsVersion.create!
+        user.bump_required_fields_version
+      end
+
+      it "redirects the user to the profile preferences" do
+        get "/hot"
+        expect(response).not_to redirect_to("/u/#{user.username}/preferences/profile")
+      end
+    end
+  end
+
+  describe "invalid request params" do
+    let(:fake_logger) { FakeLogger.new }
+
+    before { Rails.logger.broadcast_to(fake_logger) }
+
+    after { Rails.logger.stop_broadcasting_to(fake_logger) }
 
     it "should not raise a 500 (nor should it log a warning) for bad params" do
       bad_str = (+"d\xDE").force_encoding("utf-8")
@@ -254,21 +324,8 @@ RSpec.describe ApplicationController do
 
       expect(response.status).to eq(400)
 
-      log = @logs.string
-
-      if (log.include? "exception app middleware")
-        # heisentest diagnostics
-        puts
-        puts "EXTRA DIAGNOSTICS FOR INTERMITTENT TEST FAIL"
-        puts log
-        puts ">> action_dispatch.exception"
-        ex = request.env["action_dispatch.exception"]
-        puts ">> exception class: #{ex.class} : #{ex}"
-      end
-
-      expect(log).not_to include("exception app middleware")
-
-      expect(response.parsed_body).to eq("status" => 400, "error" => "Bad Request")
+      expect(fake_logger.warnings.length).to eq(0)
+      expect(response.status).to eq(400)
     end
   end
 
@@ -278,7 +335,7 @@ RSpec.describe ApplicationController do
 
       expect(response.status).to eq(400)
       expect(response.parsed_body["errors"].first).to include(
-        "param is missing or the value is empty: term",
+        "param is missing or the value is empty or invalid: term",
       )
     end
   end
@@ -368,12 +425,11 @@ RSpec.describe ApplicationController do
       end
 
       describe "no logspam" do
-        before do
-          @orig_logger = Rails.logger
-          Rails.logger = @fake_logger = FakeLogger.new
-        end
+        let(:fake_logger) { FakeLogger.new }
 
-        after { Rails.logger = @orig_logger }
+        before { Rails.logger.broadcast_to(fake_logger) }
+
+        after { Rails.logger.stop_broadcasting_to(fake_logger) }
 
         it "should handle 404 to a css file" do
           Discourse.cache.delete("page_not_found_topics:#{I18n.locale}")
@@ -395,9 +451,9 @@ RSpec.describe ApplicationController do
           expect(response.body).to include(topic1.title)
           expect(response.body).to_not include(topic2.title)
 
-          expect(@fake_logger.fatals.length).to eq(0)
-          expect(@fake_logger.errors.length).to eq(0)
-          expect(@fake_logger.warnings.length).to eq(0)
+          expect(fake_logger.fatals.length).to eq(0)
+          expect(fake_logger.errors.length).to eq(0)
+          expect(fake_logger.warnings.length).to eq(0)
         end
       end
 
@@ -547,6 +603,45 @@ RSpec.describe ApplicationController do
         expect(response.headers["Cross-Origin-Opener-Policy"]).to eq("unsafe-none")
       end
     end
+
+    describe "when `cross_origin_opener_unsafe_none_groups` site setting has been set" do
+      fab!(:group)
+      fab!(:current_user, :user)
+
+      before do
+        SiteSetting.cross_origin_opener_policy_header = "same-origin"
+        SiteSetting.cross_origin_opener_unsafe_none_groups = group.id
+      end
+
+      context "for logged in user" do
+        before { sign_in(current_user) }
+
+        it "sets `Cross-Origin-Opener-Policy` to `unsafe-none` for a listed group" do
+          group.add(current_user)
+
+          get "/latest"
+
+          expect(response.status).to eq(200)
+          expect(response.headers["Cross-Origin-Opener-Policy"]).to eq("unsafe-none")
+        end
+
+        it "sets `Cross-Origin-Opener-Policy` to configured value when group is missing" do
+          get "/latest"
+
+          expect(response.status).to eq(200)
+          expect(response.headers["Cross-Origin-Opener-Policy"]).to eq("same-origin")
+        end
+      end
+
+      context "for anon" do
+        it "sets `Cross-Origin-Opener-Policy` to configured value" do
+          get "/latest"
+
+          expect(response.status).to eq(200)
+          expect(response.headers["Cross-Origin-Opener-Policy"]).to eq("same-origin")
+        end
+      end
+    end
   end
 
   describe "splash_screen" do
@@ -566,6 +661,105 @@ RSpec.describe ApplicationController do
 
       expect(response.status).to eq(200)
       expect(response.body).not_to include("d-splash")
+    end
+
+    context "with color schemes" do
+      let!(:light_scheme) { ColorScheme.find_by(base_scheme_id: "Solarized Light") }
+      let!(:dark_scheme) { ColorScheme.find_by(base_scheme_id: "Dark") }
+
+      before do
+        SiteSetting.default_dark_mode_color_scheme_id = dark_scheme.id
+        SiteSetting.interface_color_selector = "sidebar_footer"
+        Theme.find_by(id: SiteSetting.default_theme_id).update!(color_scheme_id: light_scheme.id)
+      end
+
+      context "when light mode is forced" do
+        before { cookies[:forced_color_mode] = "light" }
+
+        it "uses the light scheme colors and doesn't include the prefers-color-scheme media query" do
+          get "/"
+
+          style = css_select("#d-splash style").to_s
+          expect(style).not_to include("prefers-color-scheme")
+
+          secondary = light_scheme.colors.find { |color| color.name == "secondary" }.hex
+          tertiary = light_scheme.colors.find { |color| color.name == "tertiary" }.hex
+          expect(style).to include(<<~CSS.indent(6))
+            html {
+              background-color: ##{secondary};
+            }
+          CSS
+          expect(style).to include(<<~CSS.indent(6))
+            #d-splash {
+              --dot-color: ##{tertiary};
+            }
+          CSS
+        end
+      end
+
+      context "when dark mode is forced" do
+        before { cookies[:forced_color_mode] = "dark" }
+
+        it "uses the dark scheme colors and doesn't include the prefers-color-scheme media query" do
+          get "/"
+
+          style = css_select("#d-splash style").to_s
+          expect(style).not_to include("prefers-color-scheme")
+
+          secondary = dark_scheme.colors.find { |color| color.name == "secondary" }.hex
+          tertiary = dark_scheme.colors.find { |color| color.name == "tertiary" }.hex
+          expect(style).to include(<<~CSS.indent(6))
+            html {
+              background-color: ##{secondary};
+            }
+          CSS
+          expect(style).to include(<<~CSS.indent(6))
+            #d-splash {
+              --dot-color: ##{tertiary};
+            }
+          CSS
+        end
+      end
+
+      context "when no color mode is forced" do
+        before { cookies[:forced_color_mode] = nil }
+
+        it "includes both dark and light colors inside prefers-color-scheme media queries" do
+          get "/"
+
+          style = css_select("#d-splash style").to_s
+
+          light_secondary = light_scheme.colors.find { |color| color.name == "secondary" }.hex
+          light_tertiary = light_scheme.colors.find { |color| color.name == "tertiary" }.hex
+
+          dark_secondary = dark_scheme.colors.find { |color| color.name == "secondary" }.hex
+          dark_tertiary = dark_scheme.colors.find { |color| color.name == "tertiary" }.hex
+
+          expect(style).to include(<<~CSS.indent(6))
+            @media (prefers-color-scheme: light) {
+              html {
+                background-color: ##{light_secondary};
+              }
+
+              #d-splash {
+                --dot-color: ##{light_tertiary};
+              }
+            }
+          CSS
+
+          expect(style).to include(<<~CSS.indent(6))
+            @media (prefers-color-scheme: dark) {
+              html {
+                background-color: ##{dark_secondary};
+              }
+
+              #d-splash {
+                --dot-color: ##{dark_tertiary};
+              }
+            }
+          CSS
+        end
+      end
     end
   end
 
@@ -647,14 +841,14 @@ RSpec.describe ApplicationController do
       get "/"
       script_src = parse(response.headers["Content-Security-Policy"])["script-src"]
 
-      expect(script_src).to_not include("example.com")
+      expect(script_src).to_not include("'unsafe-eval'")
 
-      SiteSetting.content_security_policy_script_src = "example.com"
+      SiteSetting.content_security_policy_script_src = "'unsafe-eval'"
 
       get "/"
       script_src = parse(response.headers["Content-Security-Policy"])["script-src"]
 
-      expect(script_src).to include("example.com")
+      expect(script_src).to include("'unsafe-eval'")
     end
 
     it "does not set CSP when responding to non-HTML" do
@@ -835,8 +1029,6 @@ RSpec.describe ApplicationController do
     context "with rate limits" do
       before { RateLimiter.enable }
 
-      use_redis_snapshotting
-
       it "serves a LimitExceeded error in the preferred locale" do
         SiteSetting.max_likes_per_day = 1
         post1 = Fabricate(:post)
@@ -887,11 +1079,13 @@ RSpec.describe ApplicationController do
       { HTTP_ACCEPT_LANGUAGE: locale }
     end
 
-    def locale_scripts(body)
+    def main_locale_scripts(body)
       Nokogiri::HTML5
         .parse(body)
-        .css('script[src*="assets/locales/"]')
-        .map { |script| script.attributes["src"].value }
+        .css('script[src*="extra-locales/"]')
+        .filter_map do |script|
+          script.attributes["src"].to_s[%r{extra-locales/[^/]+/([^/]+)/main.js}, 1]
+        end
     end
 
     context "with allow_user_locale disabled" do
@@ -905,7 +1099,7 @@ RSpec.describe ApplicationController do
           it "uses the default locale" do
             get "/latest", headers: headers("fr")
             expect(response.status).to eq(200)
-            expect(locale_scripts(response.body)).to contain_exactly("/assets/locales/en.js")
+            expect(main_locale_scripts(response.body)).to contain_exactly("en")
           end
         end
 
@@ -916,7 +1110,7 @@ RSpec.describe ApplicationController do
 
             get "/latest", headers: headers("fr")
             expect(response.status).to eq(200)
-            expect(locale_scripts(response.body)).to contain_exactly("/assets/locales/en.js")
+            expect(main_locale_scripts(response.body)).to contain_exactly("en")
           end
         end
       end
@@ -934,13 +1128,13 @@ RSpec.describe ApplicationController do
           it "uses the locale from the headers" do
             get "/latest", headers: headers("fr")
             expect(response.status).to eq(200)
-            expect(locale_scripts(response.body)).to contain_exactly("/assets/locales/fr.js")
+            expect(main_locale_scripts(response.body)).to contain_exactly("fr")
           end
 
           it "doesn't leak after requests" do
             get "/latest", headers: headers("fr")
             expect(response.status).to eq(200)
-            expect(locale_scripts(response.body)).to contain_exactly("/assets/locales/fr.js")
+            expect(main_locale_scripts(response.body)).to contain_exactly("fr")
             expect(I18n.locale.to_s).to eq(SiteSettings::DefaultsProvider::DEFAULT_LOCALE)
           end
         end
@@ -953,7 +1147,7 @@ RSpec.describe ApplicationController do
           it "uses the user's preferred locale" do
             get "/latest", headers: headers("fr")
             expect(response.status).to eq(200)
-            expect(locale_scripts(response.body)).to contain_exactly("/assets/locales/fr.js")
+            expect(main_locale_scripts(response.body)).to contain_exactly("fr")
           end
 
           it "serves a 404 page in the preferred locale" do
@@ -966,7 +1160,7 @@ RSpec.describe ApplicationController do
           it "serves a RenderEmpty page in the preferred locale" do
             get "/u/#{user.username}/preferences/interface"
             expect(response.status).to eq(200)
-            expect(response.body).to have_tag("script", with: { src: "/assets/locales/fr.js" })
+            expect(main_locale_scripts(response.body)).to contain_exactly("fr")
           end
         end
       end
@@ -979,7 +1173,7 @@ RSpec.describe ApplicationController do
 
           get "/latest", headers: headers("zh-CN")
           expect(response.status).to eq(200)
-          expect(locale_scripts(response.body)).to contain_exactly("/assets/locales/zh_CN.js")
+          expect(main_locale_scripts(response.body)).to contain_exactly("zh_CN")
         end
       end
 
@@ -990,7 +1184,7 @@ RSpec.describe ApplicationController do
 
           get "/latest", headers: headers("")
           expect(response.status).to eq(200)
-          expect(locale_scripts(response.body)).to contain_exactly("/assets/locales/en.js")
+          expect(main_locale_scripts(response.body)).to contain_exactly("en")
         end
       end
     end
@@ -1007,7 +1201,7 @@ RSpec.describe ApplicationController do
           it "uses the locale from the cookie" do
             get "/latest", headers: { Cookie: "locale=es" }
             expect(response.status).to eq(200)
-            expect(locale_scripts(response.body)).to contain_exactly("/assets/locales/es.js")
+            expect(main_locale_scripts(response.body)).to contain_exactly("es")
             expect(I18n.locale.to_s).to eq(SiteSettings::DefaultsProvider::DEFAULT_LOCALE) # doesn't leak after requests
           end
         end
@@ -1016,7 +1210,7 @@ RSpec.describe ApplicationController do
           it "returns the locale and region separated by an underscore" do
             get "/latest", headers: { Cookie: "locale=zh-CN" }
             expect(response.status).to eq(200)
-            expect(locale_scripts(response.body)).to contain_exactly("/assets/locales/zh_CN.js")
+            expect(main_locale_scripts(response.body)).to contain_exactly("zh_CN")
           end
         end
       end
@@ -1028,7 +1222,45 @@ RSpec.describe ApplicationController do
 
           get "/latest", headers: { Cookie: "" }
           expect(response.status).to eq(200)
-          expect(locale_scripts(response.body)).to contain_exactly("/assets/locales/en.js")
+          expect(main_locale_scripts(response.body)).to contain_exactly("en")
+        end
+      end
+    end
+
+    context "with set_locale_from_param enabled" do
+      context "when param locale differs from default locale" do
+        before do
+          SiteSetting.allow_user_locale = true
+          SiteSetting.set_locale_from_param = true
+          SiteSetting.default_locale = "en"
+        end
+
+        context "with an anonymous user" do
+          it "uses the locale from the param" do
+            get "/latest?lang=es"
+            expect(response.status).to eq(200)
+            expect(main_locale_scripts(response.body)).to contain_exactly("es")
+            expect(I18n.locale.to_s).to eq(SiteSettings::DefaultsProvider::DEFAULT_LOCALE) # doesn't leak after requests
+          end
+        end
+
+        context "when the preferred locale includes a region" do
+          it "returns the locale and region separated by an underscore" do
+            get "/latest?lang=zh-CN"
+            expect(response.status).to eq(200)
+            expect(main_locale_scripts(response.body)).to contain_exactly("zh_CN")
+          end
+        end
+      end
+
+      context "when locale param is not set" do
+        it "uses the site default locale" do
+          SiteSetting.allow_user_locale = true
+          SiteSetting.default_locale = "en"
+
+          get "/latest"
+          expect(response.status).to eq(200)
+          expect(main_locale_scripts(response.body)).to contain_exactly("en")
         end
       end
     end
@@ -1059,8 +1291,6 @@ RSpec.describe ApplicationController do
 
     before { RateLimiter.enable }
 
-    use_redis_snapshotting
-
     it "is included when API key is rate limited" do
       global_setting :max_admin_api_reqs_per_minute, 1
       api_key = ApiKey.create!(user_id: admin.id).key
@@ -1074,8 +1304,7 @@ RSpec.describe ApplicationController do
 
     it "is included when user API key is rate limited" do
       global_setting :max_user_api_reqs_per_minute, 1
-      user_api_key =
-        UserApiKey.create!(user_id: admin.id, client_id: "", application_name: "discourseapp")
+      user_api_key = UserApiKey.create!(user_id: admin.id)
       user_api_key.scopes =
         UserApiKeyScope.all_scopes.keys.map do |name|
           UserApiKeyScope.create!(name: name, user_api_key_id: user_api_key.id)
@@ -1103,13 +1332,15 @@ RSpec.describe ApplicationController do
   end
 
   describe "crawlers in slow_down_crawler_user_agents site setting" do
-    before { RateLimiter.enable }
+    before do
+      Fabricate(:admin) # to prevent redirect to the wizard
+      RateLimiter.enable
 
-    use_redis_snapshotting
-
-    it "are rate limited" do
       SiteSetting.slow_down_crawler_rate = 128
       SiteSetting.slow_down_crawler_user_agents = "badcrawler|problematiccrawler"
+    end
+
+    it "are rate limited" do
       now = Time.zone.now
       freeze_time now
 
@@ -1140,6 +1371,21 @@ RSpec.describe ApplicationController do
 
       get "/", headers: { "HTTP_USER_AGENT" => "iam problematiccrawler" }
       expect(response.status).to eq(200)
+    end
+
+    context "with anonymous caching" do
+      before do
+        global_setting :anon_cache_store_threshold, 1
+        Middleware::AnonymousCache.enable_anon_cache
+      end
+
+      it "don't bypass crawler rate limits" do
+        get "/", headers: { "HTTP_USER_AGENT" => "iam badcrawler" }
+        expect(response.status).to eq(200)
+
+        get "/", headers: { "HTTP_USER_AGENT" => "iam badcrawler" }
+        expect(response.status).to eq(429)
+      end
     end
   end
 
@@ -1188,32 +1434,50 @@ RSpec.describe ApplicationController do
     end
   end
 
-  describe "preload Link header" do
-    context "with GlobalSetting.preload_link_header" do
-      before { global_setting :preload_link_header, true }
+  describe "Early hint header" do
+    before { global_setting :cdn_url, "https://cdn.example.com/something" }
 
-      it "should have the Link header with assets on full page requests" do
-        get("/latest")
-        expect(response.headers).to include("Link")
+    it "is not included by default" do
+      get "/latest"
+      expect(response.status).to eq(200)
+      expect(response.headers["Link"]).to eq(nil)
+    end
+
+    context "when in preconnect mode" do
+      before { global_setting :early_hint_header_mode, "preconnect" }
+
+      it "includes the preconnect hint" do
+        get "/latest"
+        expect(response.status).to eq(200)
+        expect(response.headers["Link"]).to include("<https://cdn.example.com>; rel=preconnect")
+        expect(response.headers["Link"]).not_to include("rel=preload")
       end
 
-      it "shouldn't have the Link header on xhr api requests" do
-        get("/latest.json")
-        expect(response.headers).not_to include("Link")
+      it "can use a different header" do
+        global_setting :early_hint_header_name, "X-Discourse-Early-Hint"
+        get "/latest"
+        expect(response.status).to eq(200)
+        expect(response.headers["X-Discourse-Early-Hint"]).to include(
+          "<https://cdn.example.com>; rel=preconnect",
+        )
+        expect(response.headers["Link"]).to eq(nil)
+      end
+
+      it "is skipped for non-app URLs" do
+        get "/latest.json"
+        expect(response.status).to eq(200)
+        expect(response.headers["Link"]).to eq(nil)
       end
     end
 
-    context "without GlobalSetting.preload_link_header" do
-      before { global_setting :preload_link_header, false }
+    context "when in preload mode" do
+      before { global_setting :early_hint_header_mode, "preload" }
 
-      it "shouldn't have the Link header with assets on full page requests" do
-        get("/latest")
-        expect(response.headers).not_to include("Link")
-      end
-
-      it "shouldn't have the Link header on xhr api requests" do
-        get("/latest.json")
-        expect(response.headers).not_to include("Link")
+      it "includes the preload hint" do
+        get "/latest"
+        expect(response.status).to eq(200)
+        expect(response.headers["Link"]).to include('.js>; rel="preload"')
+        expect(response.headers["Link"]).to include('.css?__ws=test.localhost>; rel="preload"')
       end
     end
   end
@@ -1240,6 +1504,7 @@ RSpec.describe ApplicationController do
             "isStaffWritesOnly",
             "activatedThemes",
             "#{TopicList.new("latest", Fabricate(:anonymous), []).preload_key}",
+            "themeSiteSettingOverrides",
           ],
         )
       end
@@ -1265,6 +1530,7 @@ RSpec.describe ApplicationController do
             "activatedThemes",
             "#{TopicList.new("latest", Fabricate(:anonymous), []).preload_key}",
             "currentUser",
+            "themeSiteSettingOverrides",
             "topicTrackingStates",
             "topicTrackingStateMeta",
           ],
@@ -1273,7 +1539,7 @@ RSpec.describe ApplicationController do
     end
 
     context "when user is admin" do
-      fab!(:user) { Fabricate(:admin) }
+      fab!(:user, :admin)
 
       before { sign_in(user) }
 
@@ -1292,10 +1558,11 @@ RSpec.describe ApplicationController do
             "activatedThemes",
             "#{TopicList.new("latest", Fabricate(:anonymous), []).preload_key}",
             "currentUser",
+            "themeSiteSettingOverrides",
             "topicTrackingStates",
             "topicTrackingStateMeta",
             "fontMap",
-            "enabledPluginAdminRoutes",
+            "visiblePlugins",
           ],
         )
       end
@@ -1309,9 +1576,236 @@ RSpec.describe ApplicationController do
         )
       end
 
-      it "has correctly loaded enabledPluginAdminRoutes" do
+      it "has correctly loaded visiblePlugins" do
         get "/latest"
-        expect(JSON.parse(preloaded_json["enabledPluginAdminRoutes"])).to eq([])
+        expect(JSON.parse(preloaded_json["visiblePlugins"])).to eq([])
+      end
+    end
+
+    describe "readonly serialization" do
+      it "serializes regular readonly mode correctly" do
+        Discourse.enable_readonly_mode(Discourse::USER_READONLY_MODE_KEY)
+
+        get "/latest"
+        expect(JSON.parse(preloaded_json["isReadOnly"])).to eq(true)
+        expect(JSON.parse(preloaded_json["isStaffWritesOnly"])).to eq(false)
+      ensure
+        Discourse.disable_readonly_mode(Discourse::USER_READONLY_MODE_KEY)
+      end
+
+      it "serializes staff readonly mode correctly" do
+        Discourse.enable_readonly_mode(Discourse::STAFF_WRITES_ONLY_MODE_KEY)
+
+        get "/latest"
+        expect(JSON.parse(preloaded_json["isReadOnly"])).to eq(true)
+        expect(JSON.parse(preloaded_json["isStaffWritesOnly"])).to eq(true)
+      ensure
+        Discourse.disable_readonly_mode(Discourse::STAFF_WRITES_ONLY_MODE_KEY)
+      end
+    end
+  end
+
+  describe "#set_current_user_for_logs" do
+    fab!(:admin)
+
+    it "sets the X-Discourse-Route header to the controller name and action including namespace" do
+      sign_in(admin)
+
+      get "/admin/users/#{admin.id}.json"
+      expect(response.status).to eq(200)
+      expect(response.headers["X-Discourse-Route"]).to eq("admin/users/show")
+
+      get "/u/#{admin.username}.json"
+      expect(response.status).to eq(200)
+      expect(response.headers["X-Discourse-Route"]).to eq("users/show")
+    end
+  end
+
+  describe "color definition stylesheets" do
+    let!(:dark_scheme) { ColorScheme.find_by(base_scheme_id: "Dark") }
+
+    before do
+      SiteSetting.default_dark_mode_color_scheme_id = dark_scheme.id
+      SiteSetting.interface_color_selector = "sidebar_footer"
+    end
+
+    context "with early hints" do
+      before { global_setting :early_hint_header_mode, "preload" }
+
+      it "includes stylesheet links in the header" do
+        get "/"
+
+        expect(response.headers["Link"]).to include("color_definitions_base")
+        expect(response.headers["Link"]).to include("color_definitions_dark")
+      end
+    end
+
+    context "when the default theme's scheme is the same as the site's default dark scheme" do
+      before { Theme.find(SiteSetting.default_theme_id).update!(color_scheme_id: dark_scheme.id) }
+
+      it "includes a single color stylesheet that has media=all" do
+        get "/"
+
+        color_stylesheets =
+          css_select("link").select { |tag| tag[:href].include?("color_definitions") }
+
+        expect(color_stylesheets.size).to eq(1)
+
+        light_stylesheet = color_stylesheets.find { |tag| tag[:class] == "light-scheme" }
+        expect(light_stylesheet[:media]).to eq("all")
+      end
+    end
+
+    context "when light mode is forced" do
+      before { cookies[:forced_color_mode] = "light" }
+
+      it "includes a light stylesheet with media=all and a dark stylesheet with media=none" do
+        get "/"
+
+        color_stylesheets =
+          css_select("link").select { |tag| tag[:href].include?("color_definitions") }
+
+        expect(color_stylesheets.size).to eq(2)
+
+        light_stylesheet = color_stylesheets.find { |tag| tag[:class] == "light-scheme" }
+        dark_stylesheet = color_stylesheets.find { |tag| tag[:class] == "dark-scheme" }
+
+        expect(light_stylesheet[:media]).to eq("all")
+        expect(dark_stylesheet[:media]).to eq("none")
+      end
+
+      context "when the dark scheme no longer exists" do
+        it "includes only a light stylesheet with media=all" do
+          dark_scheme.destroy!
+          get "/"
+
+          color_stylesheets =
+            css_select("link").select { |tag| tag[:href].include?("color_definitions") }
+
+          expect(color_stylesheets.size).to eq(1)
+
+          light_stylesheet = color_stylesheets.find { |tag| tag[:class] == "light-scheme" }
+
+          expect(light_stylesheet[:media]).to eq("all")
+        end
+      end
+
+      context "when all schemes are deleted" do
+        it "includes only a light stylesheet with media=all" do
+          ColorScheme.destroy_all
+          get "/"
+
+          color_stylesheets =
+            css_select("link").select { |tag| tag[:href].include?("color_definitions") }
+
+          expect(color_stylesheets.size).to eq(1)
+
+          light_stylesheet = color_stylesheets.find { |tag| tag[:class] == "light-scheme" }
+
+          expect(light_stylesheet[:media]).to eq("all")
+        end
+      end
+    end
+
+    context "when dark mode is forced" do
+      before { cookies[:forced_color_mode] = "dark" }
+
+      it "includes a light stylesheet with media=none and a dark stylesheet with media=all" do
+        get "/"
+
+        color_stylesheets =
+          css_select("link").select { |tag| tag[:href].include?("color_definitions") }
+
+        expect(color_stylesheets.size).to eq(2)
+
+        light_stylesheet = color_stylesheets.find { |tag| tag[:class] == "light-scheme" }
+        dark_stylesheet = color_stylesheets.find { |tag| tag[:class] == "dark-scheme" }
+
+        expect(light_stylesheet[:media]).to eq("none")
+        expect(dark_stylesheet[:media]).to eq("all")
+      end
+
+      context "when the dark scheme no longer exists" do
+        it "includes only a light stylesheet with media=all" do
+          dark_scheme.destroy!
+          get "/"
+
+          color_stylesheets =
+            css_select("link").select { |tag| tag[:href].include?("color_definitions") }
+
+          expect(color_stylesheets.size).to eq(1)
+
+          light_stylesheet = color_stylesheets.find { |tag| tag[:class] == "light-scheme" }
+
+          expect(light_stylesheet[:media]).to eq("all")
+        end
+      end
+
+      context "when all schemes are deleted" do
+        it "includes only a light stylesheet with media=all" do
+          ColorScheme.destroy_all
+          get "/"
+
+          color_stylesheets =
+            css_select("link").select { |tag| tag[:href].include?("color_definitions") }
+
+          expect(color_stylesheets.size).to eq(1)
+
+          light_stylesheet = color_stylesheets.find { |tag| tag[:class] == "light-scheme" }
+
+          expect(light_stylesheet[:media]).to eq("all")
+        end
+      end
+    end
+
+    context "when color mode is automatic" do
+      before { cookies[:forced_color_mode] = nil }
+
+      it "includes a light stylesheet with media=(prefers-color-scheme: light) and a dark stylesheet with media=(prefers-color-scheme: dark)" do
+        get "/"
+
+        color_stylesheets =
+          css_select("link").select { |tag| tag[:href].include?("color_definitions") }
+
+        expect(color_stylesheets.size).to eq(2)
+
+        light_stylesheet = color_stylesheets.find { |tag| tag[:class] == "light-scheme" }
+        dark_stylesheet = color_stylesheets.find { |tag| tag[:class] == "dark-scheme" }
+
+        expect(light_stylesheet[:media]).to eq("(prefers-color-scheme: light)")
+        expect(dark_stylesheet[:media]).to eq("(prefers-color-scheme: dark)")
+      end
+
+      context "when the dark scheme no longer exists" do
+        it "includes only a light stylesheet with media=all" do
+          dark_scheme.destroy!
+          get "/"
+
+          color_stylesheets =
+            css_select("link").select { |tag| tag[:href].include?("color_definitions") }
+
+          expect(color_stylesheets.size).to eq(1)
+
+          light_stylesheet = color_stylesheets.find { |tag| tag[:class] == "light-scheme" }
+
+          expect(light_stylesheet[:media]).to eq("all")
+        end
+      end
+
+      context "when all schemes are deleted" do
+        it "includes only a light stylesheet with media=all" do
+          ColorScheme.destroy_all
+          get "/"
+
+          color_stylesheets =
+            css_select("link").select { |tag| tag[:href].include?("color_definitions") }
+
+          expect(color_stylesheets.size).to eq(1)
+
+          light_stylesheet = color_stylesheets.find { |tag| tag[:class] == "light-scheme" }
+
+          expect(light_stylesheet[:media]).to eq("all")
+        end
       end
     end
   end

@@ -1,6 +1,7 @@
 import ArrayProxy from "@ember/array/proxy";
+import { action } from "@ember/object";
 import { Promise } from "rsvp";
-import discourseComputed from "discourse-common/utils/decorators";
+import discourseComputed from "discourse/lib/decorators";
 
 export default class ResultSet extends ArrayProxy {
   loading = false;
@@ -20,6 +21,7 @@ export default class ResultSet extends ArrayProxy {
     return length < totalRows;
   }
 
+  @action
   loadMore() {
     const loadMoreUrl = this.loadMoreUrl;
     if (!loadMoreUrl) {

@@ -1,8 +1,9 @@
 import Flag from "discourse/lib/flag-targets/flag";
+import { applyValueTransformer } from "discourse/lib/transformer";
 
 export default class PostFlag extends Flag {
   title() {
-    return "flagging.title";
+    return applyValueTransformer("post-flag-title", "flagging.title");
   }
 
   customSubmitLabel() {
@@ -20,6 +21,10 @@ export default class PostFlag extends Flag {
   flagsAvailable(flagModal) {
     let flagsAvailable = flagModal.args.model.flagModel.flagsAvailable;
 
+    flagsAvailable = flagsAvailable.filter((flag) => {
+      return flag.applies_to.includes("Post");
+    });
+
     // "message user" option should be at the top
     const notifyUserIndex = flagsAvailable.indexOf(
       flagsAvailable.filterBy("name_key", "notify_user")[0]
@@ -30,6 +35,11 @@ export default class PostFlag extends Flag {
       flagsAvailable.splice(notifyUserIndex, 1);
       flagsAvailable.splice(0, 0, notifyUser);
     }
+
+    flagsAvailable = applyValueTransformer(
+      "post-flag-available-flags",
+      flagsAvailable
+    );
 
     return flagsAvailable;
   }

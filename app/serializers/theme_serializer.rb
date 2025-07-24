@@ -3,19 +3,23 @@
 require "base64"
 
 class ThemeSerializer < BasicThemeSerializer
-  attributes :color_scheme,
-             :color_scheme_id,
+  attributes :color_scheme_id,
              :user_selectable,
              :auto_update,
              :remote_theme_id,
              :settings,
+             :themeable_site_settings,
              :errors,
              :supported?,
-             :description,
              :enabled?,
              :disabled_at,
-             :theme_fields
+             :theme_fields,
+             :screenshot_url,
+             :system
 
+  has_one :color_scheme, serializer: ColorSchemeSerializer, embed: :object
+  has_one :owned_color_palette, serializer: ColorSchemeSerializer, embed: :object
+  has_one :base_palette, serializer: ColorSchemeSerializer, embed: :object
   has_one :user, serializer: UserNameSerializer, embed: :object
   has_one :disabled_by, serializer: UserNameSerializer, embed: :object
 
@@ -55,11 +59,35 @@ class ThemeSerializer < BasicThemeSerializer
     object.parent_themes
   end
 
+  def base_palette
+    ColorScheme.base
+  end
+
+  def include_base_palette?
+    object.color_scheme_id.blank? && object.owned_color_palette.blank?
+  end
+
   def settings
-    object.settings.map { |_name, setting| ThemeSettingsSerializer.new(setting, root: false) }
+    object.settings.map do |_name, setting|
+      ThemeSettingsSerializer.new(setting, scope:, root: false)
+    end
   rescue ThemeSettingsParser::InvalidYaml => e
     @errors << e.message
     nil
+  end
+
+  # Components always return an empty array here
+  def themeable_site_settings
+    # UI for editing settings always expects the value + default to be a string
+    # to compare whether the setting has been changed or not.
+    object.themeable_site_settings.each do |tss|
+      tss[:default] = tss[:default].to_s
+      tss[:value] = tss[:value].to_s
+    end
+  end
+
+  def include_themeable_site_settings?
+    !object.component?
   end
 
   def include_child_themes?
@@ -74,15 +102,15 @@ class ThemeSerializer < BasicThemeSerializer
     @errors.present?
   end
 
-  def description
-    object.internal_translations.find { |t| t.key == "theme_metadata.description" }&.value
-  end
-
   def include_disabled_at?
     object.component? && !object.enabled?
   end
 
   def include_disabled_by?
     include_disabled_at?
+  end
+
+  def system
+    object.system?
   end
 end

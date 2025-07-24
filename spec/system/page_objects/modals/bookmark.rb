@@ -13,6 +13,7 @@ module PageObjects
 
       def select_preset_reminder(identifier)
         find("#tap_tile_#{identifier}").click
+        closed?
       end
 
       def has_active_preset?(identifier)
@@ -37,6 +38,16 @@ module PageObjects
 
       def has_open_options_panel?
         has_css?(".bookmark-options-panel")
+      end
+
+      def select_relative_time_duration(duration)
+        find("#bookmark-relative-time-picker").fill_in(with: duration)
+      end
+
+      def select_relative_time_interval(interval)
+        select_kit = PageObjects::Components::SelectKit.new(".relative-time-intervals")
+        select_kit.expand
+        select_kit.select_row_by_value(interval)
       end
 
       def select_auto_delete_preference(preference)

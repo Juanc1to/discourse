@@ -3,14 +3,12 @@
 RSpec.describe DirectoryItem do
   describe "#period_types" do
     context "when verifying enum sequence" do
-      before { @period_types = DirectoryItem.period_types }
-
       it "'all' should be at 1st position" do
-        expect(@period_types[:all]).to eq(1)
+        expect(described_class.period_types[:all]).to eq(1)
       end
 
       it "'quarterly' should be at 6th position" do
-        expect(@period_types[:quarterly]).to eq(6)
+        expect(described_class.period_types[:quarterly]).to eq(6)
       end
     end
   end
@@ -45,7 +43,7 @@ RSpec.describe DirectoryItem do
 
   describe ".refresh!" do
     before do
-      freeze_time DateTime.parse("2017-02-02 12:00")
+      freeze_time_safe
       UserActionManager.enable
     end
 
@@ -180,6 +178,23 @@ RSpec.describe DirectoryItem do
         user = Fabricate(:user, approved: false)
         DirectoryItem.refresh!
         expect(DirectoryItem.where(user_id: user.id).count).to eq(0)
+      end
+    end
+
+    context "with anonymous posting" do
+      fab!(:user)
+      fab!(:group) { Fabricate(:group, users: [user]) }
+
+      before do
+        SiteSetting.allow_anonymous_mode = true
+        SiteSetting.anonymous_posting_allowed_groups = group.id.to_s
+      end
+
+      it "doesn't create records for anonymous users" do
+        anon = AnonymousShadowCreator.get(user)
+        DirectoryItem.refresh!
+        expect(DirectoryItem.where(user_id: anon.id)).to be_blank
+        expect(DirectoryItem.where(user_id: user.id)).to be_present
       end
     end
   end

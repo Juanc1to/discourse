@@ -1,3 +1,5 @@
+@use "lib/viewport";
+
 .more-topics__container {
   position: relative;
   padding-bottom: max(env(safe-area-inset-bottom), 1em);
@@ -5,18 +7,24 @@
 
   .nav {
     margin-block: 0;
+
+    @include viewport.until(lg) {
+      font-size: var(--font-down-1);
+    }
+
     li {
       .btn {
         color: var(--primary);
         background-color: transparent;
-        padding: 0.5em 5px;
-        border-radius: 0px;
-        &:hover {
-          box-shadow: inset 0px -3px 0px 0px rgba(var(--tertiary-rgb), 0.5);
+        padding: calc(0.8em - var(--d-nav-underline-height)) 0.8em; // match th block padding minus border
+        border-radius: 0;
+
+        .discourse-no-touch & {
+          &:hover {
+            background: var(--d-hover);
+          }
         }
-        &.active {
-          box-shadow: inset 0px -3px 0px 0px var(--tertiary);
-        }
+
         .d-icon,
         &:hover .d-icon,
         &:active .d-icon {
@@ -36,7 +44,7 @@
   }
 
   .more-topics__list {
-    .topic-list-header:after {
+    .topic-list-header::after {
       content: "";
       display: block;
       height: 12px;
@@ -44,10 +52,12 @@
 
     .topic-list-body {
       border-top: none;
+
       .topic-list-item {
         &:first-child td {
           padding-top: 0;
         }
+
         &:last-of-type {
           border-bottom: none;
         }
@@ -59,9 +69,13 @@
   .suggested-topics-message .badge-category__wrapper .badge-category {
     display: inline;
     vertical-align: baseline;
-    line-height: var(--line-height-medium);
     margin-right: 0;
     line-height: 0.8;
     max-width: 150px;
+  }
+
+  .more-topics__list-title,
+  .more-topics__browse-more {
+    padding-left: 0.5em;
   }
 }

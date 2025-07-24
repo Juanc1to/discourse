@@ -1,12 +1,10 @@
 # frozen_string_literal: true
 
-require "rails_helper"
-
 describe Chat::UsersFromUsernamesAndGroupsQuery do
-  fab!(:user1) { Fabricate(:user) }
-  fab!(:user2) { Fabricate(:user) }
-  fab!(:user3) { Fabricate(:user) }
-  fab!(:user4) { Fabricate(:user) }
+  fab!(:user1, :user)
+  fab!(:user2, :user)
+  fab!(:user3, :user)
+  fab!(:user4, :user)
   fab!(:group1) { Fabricate(:public_group, users: [user1, user2]) }
   fab!(:group2) { Fabricate(:public_group, users: [user3]) }
 
@@ -15,11 +13,23 @@ describe Chat::UsersFromUsernamesAndGroupsQuery do
       result = described_class.call(usernames: [user1.username, user4.username], groups: [])
       expect(result).to contain_exactly(user1, user4)
     end
+
+    it "works with a number" do
+      user = Fabricate(:user, username: 12_345_678)
+      result = described_class.call(usernames: [12_345_678], groups: [])
+      expect(result).to contain_exactly(user)
+    end
   end
 
   context "when searching by groups" do
     it "returns users belonging to the specified groups" do
       result = described_class.call(usernames: [], groups: [group1.name])
+      expect(result).to contain_exactly(user1, user2)
+    end
+
+    it "works with a number" do
+      group = Fabricate(:public_group, users: [user1, user2], name: 12_345_678)
+      result = described_class.call(usernames: [], groups: [12_345_678])
       expect(result).to contain_exactly(user1, user2)
     end
   end

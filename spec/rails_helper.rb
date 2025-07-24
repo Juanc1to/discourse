@@ -19,11 +19,15 @@ require "rbtrace" if RUBY_ENGINE == "ruby"
 require "pry"
 require "pry-byebug"
 require "pry-rails"
+require "pry-stack_explorer"
 require "fabrication"
 require "mocha/api"
 require "certified"
 require "webmock/rspec"
 require "minio_runner"
+
+CHROME_REMOTE_DEBUGGING_PORT = (ENV["CHROME_REMOTE_DEBUGGING_PORT"] || 50_062).to_s
+CHROME_REMOTE_DEBUGGING_ADDRESS = ENV["CHROME_REMOTE_DEBUGGING_ADDRESS"] || "127.0.0.1"
 
 class RspecErrorTracker
   def self.exceptions
@@ -56,12 +60,43 @@ class RspecErrorTracker
   end
 end
 
+class PlaywrightLogger
+  attr_reader :logs
+
+  def initialize(page)
+    @logs = []
+
+    page.on(
+      "console",
+      ->(msg) do
+        @logs << {
+          level: msg.type,
+          message: msg.text,
+          timestamp: Time.now.to_i * 1000,
+          source: "console-api",
+        }
+      end,
+    )
+
+    page.on(
+      "pageerror",
+      ->(error) do
+        @logs << {
+          level: "error",
+          message: error.message,
+          timestamp: Time.now.to_i * 1000,
+          source: "pageerror-api",
+        }
+      end,
+    )
+  end
+end
+
 ENV["RAILS_ENV"] ||= "test"
 require File.expand_path("../../config/environment", __FILE__)
 require "rspec/rails"
 require "shoulda-matchers"
 require "sidekiq/testing"
-require "selenium-webdriver"
 require "capybara/rails"
 
 # The shoulda-matchers gem no longer detects the test framework
@@ -81,6 +116,7 @@ Dir[Rails.root.join("spec/requests/examples/*.rb")].each { |f| require f }
 
 Dir[Rails.root.join("spec/system/helpers/**/*.rb")].each { |f| require f }
 Dir[Rails.root.join("spec/system/page_objects/**/base.rb")].each { |f| require f }
+Dir[Rails.root.join("spec/system/page_objects/**/*_base.rb")].each { |f| require f }
 Dir[Rails.root.join("spec/system/page_objects/**/*.rb")].each { |f| require f }
 
 Dir[Rails.root.join("spec/fabricators/*.rb")].each { |f| require f }
@@ -118,6 +154,7 @@ module TestSetup
     WordWatcher.disable_cache
 
     SiteSetting.provider.all.each { |setting| SiteSetting.remove_override!(setting.name) }
+    SiteSetting.refresh!(refresh_site_settings: false, refresh_theme_site_settings: true)
 
     # very expensive IO operations
     SiteSetting.automatically_download_gravatars = false
@@ -152,13 +189,14 @@ module TestSetup
 
     Middleware::AnonymousCache.disable_anon_cache
     BlockRequestsMiddleware.allow_requests!
+    BlockRequestsMiddleware.current_example_location = nil
   end
 end
 
 if ENV["PREFABRICATION"] == "0"
   module Prefabrication
-    def fab!(name, **opts, &blk)
-      blk ||= proc { Fabricate(name) }
+    def fab!(name, fabricator_name = nil, **opts, &blk)
+      blk ||= proc { Fabricate(fabricator_name || name) }
       let!(name, &blk)
     end
   end
@@ -174,8 +212,8 @@ else
   end
 
   module Prefabrication
-    def fab!(name, **opts, &blk)
-      blk ||= proc { Fabricate(name) }
+    def fab!(name, fabricator_name = nil, **opts, &blk)
+      blk ||= proc { Fabricate(fabricator_name || name) }
       let_it_be(name, refind: true, **opts, &blk)
     end
   end
@@ -184,7 +222,18 @@ end
 PER_SPEC_TIMEOUT_SECONDS = 45
 BROWSER_READ_TIMEOUT = 30
 
+# To avoid erasing `any_instance` from Mocha
+require "rspec/mocks/syntax"
+RSpec::Mocks::Syntax.singleton_class.define_method(:enable_should) { |*| nil }
+RSpec::Mocks::Syntax.singleton_class.define_method(:disable_should) { |*| nil }
+
+RSpec::Mocks::ArgumentMatchers.remove_method(:hash_including) # We’re currently relying on the version from Webmock
+
 RSpec.configure do |config|
+  config.expect_with :rspec do |c|
+    c.syntax = :expect
+  end
+
   config.fail_fast = ENV["RSPEC_FAIL_FAST"] == "1"
   config.silence_filter_announcements = ENV["RSPEC_SILENCE_FILTER_ANNOUNCEMENTS"] == "1"
   config.extend RedisSnapshotHelper
@@ -198,11 +247,23 @@ RSpec.configure do |config|
   config.include SiteSettingsHelpers
   config.include SidekiqHelpers
   config.include UploadsHelpers
+  config.include BackupsHelpers
   config.include OneboxHelpers
   config.include FastImageHelpers
-  config.mock_framework = :mocha
+  config.include ServiceMatchers
+  config.include I18nHelpers
+
   config.order = "random"
   config.infer_spec_type_from_file_location!
+
+  config.mock_with :rspec do |mocks|
+    mocks.verify_partial_doubles = true
+    mocks.verify_doubled_constant_names = true
+    mocks.syntax = :expect
+  end
+  config.mock_with MultiMock::Adapter.for(:mocha, :rspec)
+
+  config.include Mocha::API
 
   if ENV["GITHUB_ACTIONS"]
     # Enable color output in GitHub Actions
@@ -233,25 +294,48 @@ RSpec.configure do |config|
   # rspec-rails.
   config.infer_base_class_for_anonymous_controllers = true
 
-  config.full_cause_backtrace = true
+  # Shows more than one line of backtrace in case of an error or spec failure.
+  config.full_cause_backtrace = false
+
+  # Sometimes the backtrace is quite big for failing specs, this will
+  # remove rspec/gem paths from the backtrace so it's easier to see the
+  # actual application code that caused the failure.
+  #
+  # This behaviour is enabled by default, to include gems in
+  # the backtrace set DISCOURSE_INCLUDE_GEMS_IN_RSPEC_BACKTRACE=1
+  if ENV["DISCOURSE_INCLUDE_GEMS_IN_RSPEC_BACKTRACE"] != "1"
+    config.backtrace_exclusion_patterns = [
+      %r{/lib\d*/ruby/},
+      %r{bin/},
+      /gems/,
+      %r{spec/spec_helper\.rb},
+      %r{spec/rails_helper\.rb},
+      %r{lib/rspec/(core|expectations|matchers|mocks)},
+    ]
+  end
 
   config.before(:suite) do
     CachedCounting.disable
 
     begin
-      ActiveRecord::Migration.check_pending!
+      ActiveRecord::Migration.check_all_pending!
     rescue ActiveRecord::PendingMigrationError
       raise "There are pending migrations, run RAILS_ENV=test bin/rake db:migrate"
     end
 
-    Sidekiq.error_handlers.clear
+    Sidekiq.default_configuration.error_handlers.clear
 
     # Ugly, but needed until we have a user creator
     User.skip_callback(:create, :after, :ensure_in_trust_level_group)
 
     DiscoursePluginRegistry.reset! if ENV["LOAD_PLUGINS"] != "1"
     Discourse.current_user_provider = TestCurrentUserProvider
+    Discourse::Application.load_tasks
 
+    SystemThemesManager.clear_system_theme_user_history!
+    ThemeField.delete_all
+    JavascriptCache.delete_all
+    ThemeSiteSetting.delete_all
     SiteSetting.refresh!
 
     # Rebase defaults
@@ -285,6 +369,16 @@ RSpec.configure do |config|
             ["discoursetest"]
           end
         )
+
+      test_i = ENV["TEST_ENV_NUMBER"].to_i
+
+      data_dir = "#{Rails.root}/tmp/test_data_#{test_i}/minio"
+      FileUtils.rm_rf(data_dir)
+      FileUtils.mkdir_p(data_dir)
+      minio_runner_config.minio_data_directory = data_dir
+
+      minio_runner_config.minio_port = 9_000 + 2 * test_i
+      minio_runner_config.minio_console_port = 9_001 + 2 * test_i
     end
 
     WebMock.disable_net_connect!(
@@ -334,7 +428,7 @@ RSpec.configure do |config|
           @cause = cause
           super "This spec passed, but capybara waited for the full wait duration (#{wait_time}s) at least once. " +
                   "This will slow down the test suite. " +
-                  "Beware of negating the result of selenium's RSpec matchers."
+                  "Beware of negating the result of RSpec matchers."
         end
       end
 
@@ -350,6 +444,14 @@ RSpec.configure do |config|
             if RSpec.current_example
               # Store timeout for later, we'll only raise it if the test otherwise passes
               RSpec.current_example.metadata[:_capybara_timeout_exception] ||= timeout_error
+
+              if RSpec.current_example.metadata[:dump_threads_on_failure]
+                RSpec.current_example.metadata[:_capybara_server_threads_backtraces] = Thread
+                  .list
+                  .reduce([]) { |array, thread| array << thread.backtrace }
+                  .uniq
+              end
+
               raise # re-raise original error
             else
               # Outside an example... maybe a `before(:all)` hook?
@@ -372,80 +474,27 @@ RSpec.configure do |config|
       end
     end
 
-    # possible values: OFF, SEVERE, WARNING, INFO, DEBUG, ALL
-    browser_log_level = ENV["SELENIUM_BROWSER_LOG_LEVEL"] || "WARNING"
-
-    chrome_browser_options =
-      Selenium::WebDriver::Chrome::Options
-        .new(logging_prefs: { "browser" => browser_log_level, "driver" => "ALL" })
-        .tap do |options|
-          apply_base_chrome_options(options)
-          options.add_argument("--window-size=1400,1400")
-          options.add_preference("download.default_directory", Downloads::FOLDER)
-        end
-
-    driver_options = { browser: :chrome, timeout: BROWSER_READ_TIMEOUT }
-
-    if ENV["CAPYBARA_REMOTE_DRIVER_URL"].present?
-      driver_options[:browser] = :remote
-      driver_options[:url] = ENV["CAPYBARA_REMOTE_DRIVER_URL"]
+    [
+      [PostAction, :post_action_type_id],
+      [Reviewable, :target_id],
+      [ReviewableHistory, :reviewable_id],
+      [ReviewableScore, :reviewable_id],
+      [ReviewableScore, :reviewable_score_type],
+      [SidebarSectionLink, :linkable_id],
+      [SidebarSectionLink, :sidebar_section_id],
+      [User, :last_seen_reviewable_id],
+      [User, :required_fields_version],
+    ].each do |model, column|
+      DB.exec("ALTER TABLE #{model.table_name} ALTER #{column} TYPE bigint")
+      model.reset_column_information
     end
 
-    desktop_driver_options = driver_options.merge(options: chrome_browser_options)
-
-    Capybara.register_driver :selenium_chrome do |app|
-      Capybara::Selenium::Driver.new(app, **desktop_driver_options)
-    end
-
-    Capybara.register_driver :selenium_chrome_headless do |app|
-      chrome_browser_options.add_argument("--headless=new")
-      Capybara::Selenium::Driver.new(app, **desktop_driver_options)
-    end
-
-    mobile_chrome_browser_options =
-      Selenium::WebDriver::Chrome::Options
-        .new(logging_prefs: { "browser" => browser_log_level, "driver" => "ALL" })
-        .tap do |options|
-          options.add_emulation(device_name: "iPhone 12 Pro")
-          options.add_argument(
-            '--user-agent="--user-agent="Mozilla/5.0 (iPhone; CPU iPhone OS 14_7_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) FxiOS/36.0  Mobile/15E148 Safari/605.1.15"',
-          )
-          apply_base_chrome_options(options)
-        end
-
-    mobile_driver_options = driver_options.merge(options: mobile_chrome_browser_options)
-
-    Capybara.register_driver :selenium_mobile_chrome do |app|
-      Capybara::Selenium::Driver.new(app, **mobile_driver_options)
-    end
-
-    Capybara.register_driver :selenium_mobile_chrome_headless do |app|
-      mobile_chrome_browser_options.add_argument("--headless=new")
-      Capybara::Selenium::Driver.new(app, **mobile_driver_options)
-    end
-
-    Capybara.register_driver :selenium_firefox_headless do |app|
-      options =
-        Selenium::WebDriver::Firefox::Options.new(
-          args: %w[--window-size=1400,1400 --headless],
-          prefs: {
-            "browser.download.dir": Downloads::FOLDER,
-          },
-          log_level: ENV["SELENIUM_BROWSER_LOG_LEVEL"] || :warn,
-        )
-      Capybara::Selenium::Driver.new(
-        app,
-        browser: :firefox,
-        timeout: BROWSER_READ_TIMEOUT,
-        options: options,
-      )
-    end
-
-    if ENV["ELEVATED_UPLOADS_ID"]
-      DB.exec "SELECT setval('uploads_id_seq', 10000)"
-    else
-      DB.exec "SELECT setval('uploads_id_seq', 1)"
-    end
+    # Sets sequence's value to be greater than the max value that an INT column can hold. This is done to prevent
+    # type mistmatches for foreign keys that references a column of type BIGINT. We set the value to 10_000_000_000
+    # instead of 2**31-1 so that the values are easier to read.
+    DB
+      .query("SELECT sequence_name FROM information_schema.sequences WHERE data_type = 'bigint'")
+      .each { |row| DB.exec "SELECT setval('#{row.sequence_name}', '10000000000')" }
 
     # Prevents 500 errors for site setting URLs pointing to test.localhost in system specs.
     SiteIconManager.clear_cache!
@@ -510,7 +559,7 @@ RSpec.configure do |config|
         end
       end
 
-    config.around do |example|
+    config.around do |example_procsy|
       Timeout.timeout(
         PER_SPEC_TIMEOUT_SECONDS,
         SpecTimeoutError,
@@ -521,13 +570,43 @@ RSpec.configure do |config|
           condition_variable.signal
         end
 
-        example.run
+        example_procsy.run
       rescue SpecTimeoutError
+        puts "--- Potential timeout example ---"
+        puts example_procsy.example.metadata
+        puts "---"
       ensure
         mutex.synchronize { test_running = false }
         backtrace_logger.wakeup
         sleep 0.01 while !mutex.synchronize { is_waiting }
       end
+    end
+
+    # This is a monkey patch for the `Capybara.using_session` method in `capybara`. For some
+    # unknown reasons on Github Actions, we are seeing system tests failing intermittently with the error
+    # `Socket::ResolutionError: getaddrinfo: Temporary failure in name resolution` when the app tries to resolve
+    # `localhost` from within a `Capybara#using_session` block.
+    #
+    # Too much time has been spent trying to debug this issue and the root cause is still unknown so we are just dropping
+    # this workaround for now where we will retry the block once before raising the error.
+    #
+    # Potentially related: https://bugs.ruby-lang.org/issues/20172
+    module Capybara
+      class << self
+        def using_session_with_localhost_resolution(name, &block)
+          attempts = 0
+          self._using_session(name, &block)
+        rescue Socket::ResolutionError
+          puts "Socket::ResolutionError error encountered... Current thread count: #{Thread.list.size}"
+          attempts += 1
+          attempts <= 1 ? retry : raise
+        end
+      end
+    end
+
+    Capybara.singleton_class.class_eval do
+      alias_method :_using_session, :using_session
+      alias_method :using_session, :using_session_with_localhost_resolution
     end
   end
 
@@ -567,22 +646,6 @@ RSpec.configure do |config|
 
   config.before(:each, type: :system) do |example|
     if !system_tests_initialized
-      # Use a file system lock to get `selenium-manager` to download the `chromedriver` binary that is required for
-      # system tests to support running system tests in multiple processes. If we don't download the `chromedriver` binary
-      # before running system tests in multiple processes, each process will end up calling the `selenium-manager` binary
-      # to download the `chromedriver` binary at the same time but the problem is that the binary is being downloaded to
-      # the same location and this can interfere with the running tests in another process.
-      #
-      # The long term fix here is to get `selenium-manager` to download the `chromedriver` binary to a unique path for each
-      # process but the `--cache-path` option for `selenium-manager` is currently not supported in `selenium-webdriver`.
-      File.open("#{Rails.root}/tmp/chrome_driver_flock", File::RDWR | File::CREAT, 0644) do |file|
-        file.flock(File::LOCK_EX)
-
-        if !File.directory?(File.expand_path("~/.cache/selenium"))
-          `#{Selenium::WebDriver::SeleniumManager.send(:binary)} --browser chrome`
-        end
-      end
-
       # On Rails 7, we have seen instances of deadlocks between the lock in [ActiveRecord::ConnectionAdapaters::AbstractAdapter](https://github.com/rails/rails/blob/9d1673853f13cd6f756315ac333b20d512db4d58/activerecord/lib/active_record/connection_adapters/abstract_adapter.rb#L86)
       # and the lock in [ActiveRecord::ModelSchema](https://github.com/rails/rails/blob/9d1673853f13cd6f756315ac333b20d512db4d58/activerecord/lib/active_record/model_schema.rb#L550).
       # To work around this problem, we are going to preload all the model schemas before running any system tests so that
@@ -595,57 +658,180 @@ RSpec.configure do |config|
       system_tests_initialized = true
     end
 
-    driver = [:selenium]
-    driver << :mobile if example.metadata[:mobile]
-    driver << (aarch64? ? :firefox : :chrome)
-    driver << :headless unless ENV["SELENIUM_HEADLESS"] == "0"
+    driver_options = {
+      browser_type: :chromium,
+      channel: :chromium,
+      headless: (ENV["PLAYWRIGHT_HEADLESS"].presence || ENV["SELENIUM_HEADLESS"].presence) != "0",
+      args: apply_base_chrome_args,
+      acceptDownloads: true,
+      downloadsPath: Downloads::FOLDER,
+      slowMo: ENV["PLAYWRIGHT_SLOW_MO_MS"].to_i, # https://playwright.dev/docs/api/class-browsertype#browser-type-launch-option-slow-mo
+      playwright_cli_executable_path: "./node_modules/.bin/playwright",
+      logger: Logger.new(IO::NULL),
+      timezoneId: example.metadata[:timezone],
+      colorScheme: example.metadata[:color_scheme],
+    }
 
-    if driver.include?(:firefox)
-      STDERR.puts(
-        "WARNING: Running system specs using the Firefox driver is not officially supported. Some tests will fail.",
+    if ENV["CAPYBARA_REMOTE_DRIVER_URL"].present?
+      driver_options[:browser] = :remote
+      driver_options[:url] = ENV["CAPYBARA_REMOTE_DRIVER_URL"]
+    end
+
+    Capybara.register_driver(:playwright_mobile_chrome) do |app|
+      Capybara::Playwright::Driver.new(
+        app,
+        **driver_options,
+        deviceScaleFactor: 3,
+        isMobile: true,
+        hasTouch: true,
+        userAgent:
+          "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.4 Mobile/15E148 Safari/604.1",
+        defaultBrowserType: "webkit",
+        viewport: ENV["PLAYWRIGHT_NO_VIEWPORT"] == "1" ? nil : { width: 390, height: 664 },
       )
     end
+
+    Capybara.register_driver(:playwright_chrome) do |app|
+      Capybara::Playwright::Driver.new(
+        app,
+        **driver_options,
+        viewport: ENV["PLAYWRIGHT_NO_VIEWPORT"] == "1" ? nil : { width: 1400, height: 1400 },
+      )
+    end
+
+    Capybara.default_driver = :playwright_chrome
+
+    driver = [:playwright]
+    driver << :mobile if example.metadata[:mobile]
+    driver << :chrome
 
     driven_by driver.join("_").to_sym
 
     setup_system_test
+
+    BlockRequestsMiddleware.current_example_location = example.location
+
+    if example.metadata[:video]
+      Capybara.current_session.driver.on_save_screenrecord do |video|
+        saved_path =
+          File.join(
+            Capybara.save_path,
+            "#{example.metadata[:full_description].parameterize}-screenrecord.webm",
+          )
+
+        FileUtils.mv(video, saved_path)
+
+        if !ENV["CI"]
+          puts "\n🎥 Recorded video for: #{example.metadata[:full_description]}\n"
+          puts "#{saved_path}\n"
+        end
+      end
+    end
+
+    if example.metadata[:trace]
+      page.driver.start_tracing(screenshots: true, snapshots: true, sources: true)
+    end
+
+    page.driver.with_playwright_page do |pw_page|
+      $playwright_logger = PlaywrightLogger.new(pw_page)
+    end
+  end
+
+  config.after :each do |example|
+    if example.exception && RspecErrorTracker.exceptions.present?
+      lines = (RSpec.current_example.metadata[:extra_failure_lines] ||= +"")
+
+      lines << "\n"
+      lines << "~~~~~~~ SERVER EXCEPTIONS ~~~~~~~"
+      lines << "\n"
+
+      RspecErrorTracker.exceptions.each_with_index do |(path, ex), index|
+        lines << "\n"
+        lines << "Error encountered while processing #{path}.\n"
+        lines << "  #{ex.class}: #{ex.message}\n"
+        framework_lines_excluded = 0
+
+        ex.backtrace.each_with_index do |line, backtrace_index|
+          # This behaviour is enabled by default, to include gems in
+          # the backtrace set DISCOURSE_INCLUDE_GEMS_IN_RSPEC_BACKTRACE=1
+          if ENV["DISCOURSE_INCLUDE_GEMS_IN_RSPEC_BACKTRACE"] != "1"
+            if line.match?(%r{/gems/})
+              framework_lines_excluded += 1
+              next
+            else
+              if framework_lines_excluded.positive?
+                lines << "    ...(#{framework_lines_excluded} framework line(s) excluded)\n"
+                framework_lines_excluded = 0
+              end
+            end
+          end
+          lines << "    #{line}\n"
+        end
+      end
+
+      lines << "\n"
+      lines << "~~~~~~~ END SERVER EXCEPTIONS ~~~~~~~"
+      lines << "\n"
+    end
+
+    unfreeze_time
+    ActionMailer::Base.deliveries.clear
+    Discourse.redis.flushdb
+    Scheduler::Defer.do_all_work
   end
 
   config.after(:each, type: :system) do |example|
-    lines = RSpec.current_example.metadata[:extra_failure_lines]
+    if example.metadata[:trace]
+      path =
+        File.join(
+          Capybara.save_path,
+          "#{example.metadata[:full_description].parameterize}-trace.zip",
+        )
+      page.driver.stop_tracing(path:)
 
-    # This is disabled by default because it is super verbose,
-    # if you really need to dig into how selenium is communicating
-    # for system tests then enable it.
-    if ENV["SELENIUM_VERBOSE_DRIVER_LOGS"]
-      lines << "~~~~~~~ DRIVER LOGS ~~~~~~~"
-      page.driver.browser.logs.get(:driver).each { |log| lines << log.message }
-      lines << "~~~~~ END DRIVER LOGS ~~~~~"
+      if !ENV["CI"]
+        puts "\n🧭 Recorded trace for: #{example.metadata[:full_description]}\n"
+        puts "Open with `pnpm playwright show-trace #{path}`\n"
+      end
     end
 
-    # The logs API isn’t available (yet?) with the Firefox driver
-    js_logs = aarch64? ? [] : page.driver.browser.logs.get(:browser)
+    lines = RSpec.current_example.metadata[:extra_failure_lines]
+
+    if example.exception &&
+         (
+           backtraces = RSpec.current_example.metadata[:_capybara_server_threads_backtraces]
+         ).present?
+      lines << "~~~~~~~ SERVER THREADS BACKTRACES ~~~~~~~"
+
+      backtraces.each_with_index do |backtrace, index|
+        lines << "\n" if index != 0
+        backtrace.each { |line| lines << line }
+      end
+
+      lines << "~~~~~~~ END SERVER THREADS BACKTRACES ~~~~~~~"
+      lines << "\n"
+    end
 
     # Recommended that this is not disabled, since it makes debugging
     # failed system tests a lot trickier.
-    if ENV["SELENIUM_DISABLE_VERBOSE_JS_LOGS"].blank?
+    if ENV["PLAYWRIGHT_DISABLE_VERBOSE_JS_LOGS"].blank? && $playwright_logger
       if example.exception
         lines << "~~~~~~~ JS LOGS ~~~~~~~"
 
-        if js_logs.empty?
+        if $playwright_logger.logs.empty?
           lines << "(no logs)"
         else
-          js_logs.each do |log|
+          $playwright_logger.logs.each do |log|
             # System specs are full of image load errors that are just noise, no need
             # to log this.
             if (
-                 log.message.include?("Failed to load resource: net::ERR_CONNECTION_REFUSED") &&
-                   (log.message.include?("uploads") || log.message.include?("images"))
-               ) || log.message.include?("favicon.ico")
+                 log[:message].include?("Failed to load resource: net::ERR_CONNECTION_REFUSED") &&
+                   (log[:message].include?("uploads") || log[:message].include?("images"))
+               ) || log[:message].include?("favicon.ico")
               next
             end
 
-            lines << log.message
+            lines << log[:message]
           end
         end
 
@@ -653,9 +839,9 @@ RSpec.configure do |config|
       end
     end
 
-    js_logs.each do |log|
-      next if log.level != "WARNING"
-      deprecation_id = log.message[/\[deprecation id: ([^\]]+)\]/, 1]
+    $playwright_logger.logs.each do |log|
+      next if log[:level] != "WARNING"
+      deprecation_id = log[:message][/\[deprecation id: ([^\]]+)\]/, 1]
       next if deprecation_id.nil?
 
       deprecations = RSpec.current_example.metadata[:js_deprecations] ||= {}
@@ -670,28 +856,6 @@ RSpec.configure do |config|
 
     Capybara.reset_session!
     MessageBus.backend_instance.reset! # Clears all existing backlog from memory backend
-    Discourse.redis.flushdb
-  end
-
-  config.after :each do |example|
-    if example.exception && RspecErrorTracker.exceptions.present?
-      lines = (RSpec.current_example.metadata[:extra_failure_lines] ||= +"")
-
-      lines << "~~~~~~~ SERVER EXCEPTIONS ~~~~~~~"
-
-      RspecErrorTracker.exceptions.each_with_index do |(path, ex), index|
-        lines << "\n"
-        lines << "Error encountered while proccessing #{path}"
-        lines << "  #{ex.class}: #{ex.message}"
-        ex.backtrace.each { |line| lines << "    #{line}\n" }
-      end
-
-      lines << "~~~~~~~ END SERVER EXCEPTIONS ~~~~~~~"
-      lines << "\n"
-    end
-
-    unfreeze_time
-    ActionMailer::Base.deliveries.clear
   end
 
   config.before(:each, type: :multisite) do
@@ -703,7 +867,7 @@ RSpec.configure do |config|
   end
 
   config.after(:each, type: :multisite) do
-    ActiveRecord::Base.clear_all_connections!
+    ActiveRecord::Base.connection_handler.clear_all_connections!
     Rails.configuration.multisite = false # rubocop:disable Discourse/NoDirectMultisiteManipulation
     RailsMultisite::ConnectionManagement.clear_settings!
     ActiveRecord::Base.establish_connection
@@ -764,6 +928,14 @@ def set_cdn_url(cdn_url)
   end
 end
 
+# Time.now can cause flaky tests, especially in cases like
+# leap days. This method freezes time at a "safe" specific
+# time (the Discourse 1.1 release date), so it will not be
+# affected by further temporal disruptions.
+def freeze_time_safe
+  freeze_time(DateTime.parse("2014-08-26 12:00:00"))
+end
+
 def freeze_time(now = Time.now)
   time = now
   datetime = now
@@ -804,10 +976,38 @@ def unfreeze_time
   TrackTimeStub.unstub(:stubbed)
 end
 
-def file_from_fixtures(filename, directory = "images")
+def file_from_fixtures(filename, directory = "images", root_path = "#{Rails.root}/spec/fixtures")
   tmp_file_path = File.join(concurrency_safe_tmp_dir, SecureRandom.hex << filename)
-  FileUtils.cp("#{Rails.root}/spec/fixtures/#{directory}/#{filename}", tmp_file_path)
+  FileUtils.cp("#{root_path}/#{directory}/#{filename}", tmp_file_path)
   File.new(tmp_file_path)
+end
+
+def plugin_file_from_fixtures(filename, directory = "images")
+  # We [1] here instead of [0] because the first caller is the current method.
+  #
+  # /home/mb/repos/discourse-ai/spec/lib/modules/ai_bot/tools/discourse_meta_search_spec.rb:17:in `block (2 levels) in <main>'
+  first_non_gem_caller = caller_locations.select { |loc| !loc.to_s.match?(/gems/) }[1]&.path
+  raise StandardError.new("Could not find caller for fixture #{filename}") if !first_non_gem_caller
+
+  # This is the full path of the plugin spec file that needs a fixture.
+  # realpath makes sure we follow symlinks.
+  #
+  # #<Pathname:/home/mb/repos/discourse-ai/spec/lib/modules/ai_bot/tools/discourse_meta_search_spec.rb>
+  plugin_caller_path = Pathname.new(first_non_gem_caller).realpath
+
+  plugin_match =
+    Discourse.plugins.find do |plugin|
+      # realpath makes sure we follow symlinks
+      plugin_caller_path.to_s.starts_with?(Pathname.new(plugin.root_dir).realpath.to_s)
+    end
+
+  if !plugin_match
+    raise StandardError.new(
+            "Could not find matching plugin for #{plugin_caller_path} and fixture #{filename}",
+          )
+  end
+
+  file_from_fixtures(filename, directory, "#{plugin_match.root_dir}/spec/fixtures")
 end
 
 def file_from_contents(contents, filename, directory = "images")
@@ -842,6 +1042,23 @@ def has_trigger?(trigger_name)
   SQL
 end
 
+def stub_deprecated_settings!(override:)
+  SiteSetting.load_settings("#{Rails.root}/spec/fixtures/site_settings/deprecated_test.yml")
+
+  stub_const(
+    SiteSettings::DeprecatedSettings,
+    "SETTINGS",
+    [["old_one", "new_one", override, "0.0.1"]],
+  ) do
+    SiteSetting.setup_deprecated_methods
+    yield
+  end
+
+  defaults = SiteSetting.defaults.instance_variable_get(:@defaults)
+  defaults.each { |_, hash| hash.delete(:old_one) }
+  defaults.each { |_, hash| hash.delete(:new_one) }
+end
+
 def silence_stdout
   STDOUT.stubs(:write)
   yield
@@ -849,13 +1066,17 @@ ensure
   STDOUT.unstub(:write)
 end
 
+def Rails.logger=(logger)
+  raise "Setting Rails.logger is not allowed as it can lead to unexpected behavior in tests. Use `fake_logger = track_log_messages { ... }` instead."
+end
+
 def track_log_messages
-  old_logger = Rails.logger
-  logger = Rails.logger = FakeLogger.new
+  logger = FakeLogger.new
+  Rails.logger.broadcast_to(logger)
   yield logger
   logger
 ensure
-  Rails.logger = old_logger
+  Rails.logger.stop_broadcasting_to(logger)
 end
 
 # this takes a string and returns a copy where 2 different
@@ -895,24 +1116,20 @@ def decrypt_auth_cookie(cookie)
   ].with_indifferent_access
 end
 
-def apply_base_chrome_options(options)
-  # possible values: undocked, bottom, right, left
-  chrome_dev_tools = ENV["CHROME_DEV_TOOLS"]
+def apply_base_chrome_args(args = [])
+  base_args = %w[
+    --disable-search-engine-choice-screen
+    --no-sandbox
+    --disable-dev-shm-usage
+    --mute-audio
+    --remote-allow-origins=*
+    --disable-smooth-scrolling
+  ]
 
-  if chrome_dev_tools
-    options.add_argument("--auto-open-devtools-for-tabs")
-    options.add_preference(
-      "devtools",
-      "preferences" => {
-        "currentDockState" => "\"#{chrome_dev_tools}\"",
-        "panel-selectedTab" => '"console"',
-      },
-    )
+  if !ENV["CI"]
+    base_args << "--remote-debugging-port=" + CHROME_REMOTE_DEBUGGING_PORT
+    base_args << "--remote-debugging-address=" + CHROME_REMOTE_DEBUGGING_ADDRESS
   end
-
-  options.add_argument("--no-sandbox")
-  options.add_argument("--disable-dev-shm-usage")
-  options.add_argument("--mute-audio")
 
   # A file that contains just a list of paths like so:
   #
@@ -923,16 +1140,14 @@ def apply_base_chrome_options(options)
   if ENV["CHROME_LOAD_EXTENSIONS_MANIFEST"].present?
     File
       .readlines(ENV["CHROME_LOAD_EXTENSIONS_MANIFEST"])
-      .each { |path| options.add_argument("--load-extension=#{path}") }
+      .each { |path| base_args << "--load-extension=#{path}" }
   end
 
   if ENV["CHROME_DISABLE_FORCE_DEVICE_SCALE_FACTOR"].blank?
-    options.add_argument("--force-device-scale-factor=1")
+    base_args << "--force-device-scale-factor=1"
   end
-end
 
-def aarch64?
-  RUBY_PLATFORM == "aarch64-linux"
+  base_args + args
 end
 
 class SpecSecureRandom

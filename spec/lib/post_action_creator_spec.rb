@@ -1,15 +1,13 @@
 # frozen_string_literal: true
 
 RSpec.describe PostActionCreator do
-  fab!(:admin) { Fabricate(:admin, refresh_auto_groups: true) }
+  fab!(:admin)
   fab!(:user) { Fabricate(:user, refresh_auto_groups: true) }
   fab!(:post)
   let(:like_type_id) { PostActionType.types[:like] }
 
   describe "rate limits" do
     before { RateLimiter.enable }
-
-    use_redis_snapshotting
 
     it "limits redo/undo" do
       PostActionCreator.like(user, post)
@@ -195,6 +193,31 @@ RSpec.describe PostActionCreator do
         reviewable = result.reviewable
 
         expect(reviewable.force_review).to eq(true)
+      end
+    end
+
+    describe "non-human user being flagged" do
+      fab!(:system_post) { Fabricate(:post, user: Discourse.system_user) }
+
+      it "doesn't create reviewable" do
+        result = PostActionCreator.create(user, system_post, :inappropriate)
+        expect(result.success?).to eq(true)
+
+        expect(result.reviewable).to be_blank
+      end
+
+      it "applies modifier and can allow reviewable creation for non-human users" do
+        plugin = Plugin::Instance.new
+        modifier = :post_action_creator_block_reviewable_for_bot
+        proc = Proc.new { false }
+        DiscoursePluginRegistry.register_modifier(plugin, modifier, &proc)
+
+        result = PostActionCreator.create(user, system_post, :inappropriate)
+        expect(result.success?).to eq(true)
+
+        expect(result.reviewable).to be_present
+      ensure
+        DiscoursePluginRegistry.unregister_modifier(plugin, modifier, &proc)
       end
     end
 

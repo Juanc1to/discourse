@@ -1,12 +1,20 @@
+import { cached, tracked } from "@glimmer/tracking";
 import EmberObject, { computed } from "@ember/object";
+import { dependentKeyCompat } from "@ember/object/compat";
 import { alias, and, equal, notEmpty, or } from "@ember/object/computed";
+import { service } from "@ember/service";
 import { Promise } from "rsvp";
 import { resolveShareUrl } from "discourse/helpers/share-url";
 import { ajax } from "discourse/lib/ajax";
 import { popupAjaxError } from "discourse/lib/ajax-error";
 import { fmt, propertyEqual } from "discourse/lib/computed";
+import { TOPIC_VISIBILITY_REASONS } from "discourse/lib/constants";
+import discourseComputed from "discourse/lib/decorators";
+import deprecated from "discourse/lib/deprecated";
 import { longDate } from "discourse/lib/formatter";
+import getURL from "discourse/lib/get-url";
 import { applyModelTransformations } from "discourse/lib/model-transformers";
+import { deepMerge } from "discourse/lib/object";
 import PreloadStore from "discourse/lib/preload-store";
 import { emojiUnescape } from "discourse/lib/text";
 import { fancyTitle } from "discourse/lib/topic-fancy-title";
@@ -15,13 +23,9 @@ import ActionSummary from "discourse/models/action-summary";
 import Bookmark from "discourse/models/bookmark";
 import RestModel from "discourse/models/rest";
 import Site from "discourse/models/site";
-import User from "discourse/models/user";
+import TopicDetails from "discourse/models/topic-details";
 import { flushMap } from "discourse/services/store";
-import deprecated from "discourse-common/lib/deprecated";
-import getURL from "discourse-common/lib/get-url";
-import { deepMerge } from "discourse-common/lib/object";
-import discourseComputed from "discourse-common/utils/decorators";
-import I18n from "discourse-i18n";
+import { i18n } from "discourse-i18n";
 import Category from "./category";
 
 export function loadTopicView(topic, args) {
@@ -35,9 +39,10 @@ export function loadTopicView(topic, args) {
 
   return PreloadStore.getAndRemove(`topic_${topic.id}`, () =>
     ajax(jsonUrl, { data })
-  ).then((json) => {
+  ).then(async (json) => {
     json.categories?.forEach((c) => topic.site.updateCategory(c));
     topic.updateFromJson(json);
+    await Topic.applyTransformations([topic]);
     return json;
   });
 }
@@ -173,15 +178,15 @@ export default class Topic extends RestModel {
     return promise;
   }
 
-  static bulkOperation(topics, operation, options, tracked) {
+  static bulkOperation(topics, operation, options, isTracked) {
     const data = {
       topic_ids: topics.mapBy("id"),
       operation,
-      tracked,
+      tracked: isTracked,
     };
 
     if (options) {
-      if (options.select) {
+      if (options.silent) {
         data.silent = true;
       }
     }
@@ -192,8 +197,8 @@ export default class Topic extends RestModel {
     });
   }
 
-  static bulkOperationByFilter(filter, operation, options, tracked) {
-    const data = { filter, operation, tracked };
+  static bulkOperationByFilter(filter, operation, options, isTracked) {
+    const data = { filter, operation, tracked: isTracked };
 
     if (options) {
       if (options.categoryId) {
@@ -222,14 +227,18 @@ export default class Topic extends RestModel {
   }
 
   static resetNew(category, include_subcategories, opts = {}) {
-    let { tracked, tag, topicIds } = {
+    let {
+      tracked: isTracked,
+      tag,
+      topicIds,
+    } = {
       tracked: false,
       tag: null,
       topicIds: null,
       ...opts,
     };
 
-    const data = { tracked };
+    const data = { tracked: isTracked };
     if (category) {
       data.category_id = category.id;
       data.include_subcategories = include_subcategories;
@@ -289,6 +298,12 @@ export default class Topic extends RestModel {
     await applyModelTransformations("topic", topics);
   }
 
+  @service currentUser;
+  @service siteSettings;
+
+  @tracked deleted_by;
+  @tracked deleted_at;
+
   message = null;
   errorLoading = false;
 
@@ -305,6 +320,11 @@ export default class Topic extends RestModel {
   @propertyEqual("last_read_post_number", "highest_post_number") readLastPost;
   @and("pinned", "readLastPost") canClearPin;
   @or("details.can_edit", "details.can_edit_tags") canEditTags;
+
+  @tracked _details = this.store.createRecord("topicDetails", {
+    id: this.id,
+    topic: this,
+  });
 
   @discourseComputed("last_read_post_number", "highest_post_number")
   visited(lastReadPostNumber, highestPostNumber) {
@@ -387,10 +407,10 @@ export default class Topic extends RestModel {
       const createdAtStr = moment(createdAt).format(BUMPED_FORMAT);
 
       return bumpedAtStr !== createdAtStr
-        ? `${I18n.t("topic.created_at", {
+        ? `${i18n("topic.created_at", {
             date: longDate(createdAt),
-          })}\n${I18n.t("topic.bumped_at", { date: longDate(bumpedAt) })}`
-        : I18n.t("topic.created_at", { date: longDate(createdAt) });
+          })}\n${i18n("topic.bumped_at", { date: longDate(bumpedAt) })}`
+        : i18n("topic.created_at", { date: longDate(createdAt) });
     }
   }
 
@@ -425,18 +445,20 @@ export default class Topic extends RestModel {
     return newTags;
   }
 
-  @discourseComputed("related_messages")
-  relatedMessages(relatedMessages) {
-    if (relatedMessages) {
-      return relatedMessages.map((st) => this.store.createRecord("topic", st));
-    }
+  @dependentKeyCompat
+  @cached
+  get relatedMessages() {
+    return this.get("related_messages")?.map((st) =>
+      this.store.createRecord("topic", st)
+    );
   }
 
-  @discourseComputed("suggested_topics")
-  suggestedTopics(suggestedTopics) {
-    if (suggestedTopics) {
-      return suggestedTopics.map((st) => this.store.createRecord("topic", st));
-    }
+  @dependentKeyCompat
+  @cached
+  get suggestedTopics() {
+    return this.get("suggested_topics")?.map((st) =>
+      this.store.createRecord("topic", st)
+    );
   }
 
   @discourseComputed("posts_count")
@@ -445,14 +467,17 @@ export default class Topic extends RestModel {
   }
 
   get details() {
-    return (this._details ??= this.store.createRecord("topicDetails", {
-      id: this.id,
-      topic: this,
-    }));
+    return this._details;
   }
 
   set details(value) {
-    this._details = value;
+    if (value instanceof TopicDetails) {
+      this._details = value;
+      return;
+    }
+
+    // we need to ensure that details is an instance of TopicDetails
+    this._details = this.store.createRecord("topicDetails", value);
   }
 
   @discourseComputed("visible")
@@ -460,12 +485,27 @@ export default class Topic extends RestModel {
     return visible !== undefined ? !visible : undefined;
   }
 
+  @discourseComputed("visibility_reason_id")
+  visibilityReasonTranslated() {
+    if (
+      this.visibility_reason_id &&
+      this.visibility_reason_id !== TOPIC_VISIBILITY_REASONS.unknown
+    ) {
+      const reasonKey = Object.keys(TOPIC_VISIBILITY_REASONS).find(
+        (key) => TOPIC_VISIBILITY_REASONS[key] === this.visibility_reason_id
+      );
+      return i18n(`topic_statuses.visibility_reasons.${reasonKey}`);
+    }
+
+    return "";
+  }
+
   @discourseComputed("id")
   searchContext(id) {
     return { type: "topic", id };
   }
 
-  @computed("category_id")
+  @computed("category_id", "site.categoriesById.[]")
   get category() {
     return Category.findById(this.category_id);
   }
@@ -476,8 +516,7 @@ export default class Topic extends RestModel {
 
   @discourseComputed("url")
   shareUrl(url) {
-    const user = User.current();
-    return resolveShareUrl(url, user);
+    return resolveShareUrl(url, this.currentUser);
   }
 
   @discourseComputed("id", "slug")
@@ -732,8 +771,8 @@ export default class Topic extends RestModel {
         if (
           opts.force_destroy ||
           (!deleted_by.staff &&
-            !deleted_by.groups.some(
-              (group) => group.name === this.category?.reviewable_by_group_name
+            !deleted_by.groups.some((group) =>
+              this.category?.moderating_group_ids?.includes(group.id)
             ) &&
             !deleted_by.can_delete_all_posts_and_topics)
         ) {

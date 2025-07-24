@@ -6,8 +6,6 @@ end
 module SiteSettings::DeprecatedSettings
   SETTINGS = [
     # [<old setting>, <new_setting>, <override>, <version to drop>]
-    ["search_tokenize_chinese_japanese_korean", "search_tokenize_chinese", true, "2.9"],
-    ["default_categories_regular", "default_categories_normal", true, "3.0"],
     ["anonymous_posting_min_trust_level", "anonymous_posting_allowed_groups", false, "3.3"],
     ["shared_drafts_min_trust_level", "shared_drafts_allowed_groups", false, "3.3"],
     ["min_trust_level_for_here_mention", "here_mention_allowed_groups", false, "3.3"],
@@ -47,6 +45,9 @@ module SiteSettings::DeprecatedSettings
       false,
       "3.3",
     ],
+    ["min_first_post_typing_time", "fast_typing_threshold", false, "3.4"],
+    ["twitter_summary_large_image", "x_summary_large_image", false, "3.4"],
+    ["external_system_avatars_enabled", "external_system_avatars_url", false, "3.5"],
   ]
 
   OVERRIDE_TL_GROUP_SETTINGS = %w[
@@ -141,7 +142,7 @@ module SiteSettings::DeprecatedSettings
         end
       end
 
-      define_singleton_method old_setting do |warn: true|
+      define_singleton_method old_setting do |scoped_to = nil, warn: true|
         if warn
           Discourse.deprecate(
             "`SiteSetting.#{old_setting}` has been deprecated. Please use `SiteSetting.#{new_setting}` instead.",
@@ -152,13 +153,13 @@ module SiteSettings::DeprecatedSettings
         if OVERRIDE_TL_GROUP_SETTINGS.include?(old_setting)
           self.public_send("_group_to_tl_#{old_setting}")
         else
-          self.public_send(override ? new_setting : "_#{old_setting}")
+          self.public_send(override ? new_setting : "_#{old_setting}", scoped_to)
         end
       end
 
       SiteSetting.singleton_class.alias_method(:"_#{old_setting}?", :"#{old_setting}?") if !override
 
-      define_singleton_method "#{old_setting}?" do |warn: true|
+      define_singleton_method "#{old_setting}?" do |scoped_to = nil, warn: true|
         if warn
           Discourse.deprecate(
             "`SiteSetting.#{old_setting}?` has been deprecated. Please use `SiteSetting.#{new_setting}?` instead.",
@@ -166,7 +167,7 @@ module SiteSettings::DeprecatedSettings
           )
         end
 
-        self.public_send("#{override ? new_setting : "_" + old_setting}?")
+        self.public_send("#{override ? new_setting : "_" + old_setting}?", scoped_to)
       end
 
       SiteSetting.singleton_class.alias_method(:"_#{old_setting}=", :"#{old_setting}=") if !override

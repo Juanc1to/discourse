@@ -8,9 +8,6 @@ module("Unit | Controller | preferences/account", function (hooks) {
     const siteSettings = this.owner.lookup("service:site-settings");
     siteSettings.enable_google_oauth2_logins = true;
 
-    const site = this.owner.lookup("service:site");
-    site.set("isMobileDevice", false);
-
     const controller = this.owner.lookup("controller:preferences/account");
     controller.setProperties({
       model: {
@@ -23,15 +20,15 @@ module("Unit | Controller | preferences/account", function (hooks) {
       },
     });
 
-    assert.strictEqual(controller.canUpdateAssociatedAccounts, false);
+    assert.false(controller.canUpdateAssociatedAccounts);
 
     controller.set("model.second_factor_enabled", false);
-    assert.strictEqual(controller.canUpdateAssociatedAccounts, false);
+    assert.false(controller.canUpdateAssociatedAccounts);
 
     controller.set("model.is_anonymous", false);
-    assert.strictEqual(controller.canUpdateAssociatedAccounts, false);
+    assert.false(controller.canUpdateAssociatedAccounts);
 
     controller.set("model.id", 1234);
-    assert.strictEqual(controller.canUpdateAssociatedAccounts, true);
+    assert.true(controller.canUpdateAssociatedAccounts);
   });
 });

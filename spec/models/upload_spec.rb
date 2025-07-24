@@ -16,6 +16,8 @@ RSpec.describe Upload do
   let(:attachment_path) { __FILE__ }
   let(:attachment) { File.new(attachment_path) }
 
+  it { is_expected.to have_many(:badges).dependent(:nullify) }
+
   describe ".with_no_non_post_relations" do
     it "does not find non-post related uploads" do
       post_upload = Fabricate(:upload)
@@ -109,7 +111,11 @@ RSpec.describe Upload do
     upload = UploadCreator.new(huge_image, "image.png").create_for(user_id)
     expect(upload.persisted?).to eq(false)
     expect(upload.errors.messages[:base].first).to eq(
-      I18n.t("upload.images.larger_than_x_megapixels", max_image_megapixels: 10),
+      I18n.t(
+        "upload.images.larger_than_x_megapixels",
+        max_image_megapixels: 10,
+        original_filename: upload.original_filename,
+      ),
     )
   end
 
@@ -451,7 +457,7 @@ RSpec.describe Upload do
       end
 
       it "marks the upload as not secure if its access control post is a public post" do
-        FileStore::S3Store.any_instance.expects(:update_upload_ACL).with(upload)
+        FileStore::S3Store.any_instance.expects(:update_upload_access_control).with(upload)
         upload.update!(secure: true, access_control_post: Fabricate(:post))
         upload.update_secure_status
         expect(upload.secure).to eq(false)
@@ -464,18 +470,9 @@ RSpec.describe Upload do
       end
 
       it "does not attempt to change the ACL if the secure status has not changed" do
-        FileStore::S3Store.any_instance.expects(:update_upload_ACL).with(upload).never
+        FileStore::S3Store.any_instance.expects(:update_upload_access_control).with(upload).never
         upload.update!(secure: true, access_control_post: Fabricate(:private_message_post))
         upload.update_secure_status
-      end
-
-      it "does not attempt to change the ACL if s3_use_acls is disabled" do
-        SiteSetting.secure_uploads = false
-        SiteSetting.s3_use_acls = false
-        FileStore::S3Store.any_instance.expects(:update_upload_ACL).with(upload).never
-        upload.update!(secure: true, access_control_post: Fabricate(:post))
-        upload.update_secure_status
-        expect(upload.secure).to eq(false)
       end
 
       it "marks an image upload as secure if login_required is enabled" do
@@ -516,7 +513,7 @@ RSpec.describe Upload do
       it "does not throw an error if the object storage provider does not support ACLs" do
         FileStore::S3Store
           .any_instance
-          .stubs(:update_upload_ACL)
+          .stubs(:update_upload_access_control)
           .raises(
             Aws::S3::Errors::NotImplemented.new(
               "A header you provided implies functionality that is not implemented",
@@ -807,6 +804,30 @@ RSpec.describe Upload do
       )
 
       expect { u.update!(dominant_color: "abcd") }.to raise_error(ActiveRecord::RecordInvalid)
+    end
+  end
+
+  describe ".mark_invalid_s3_uploads_as_missing" do
+    it "should update all upload records with a `verification_status` of `invalid_etag` to `s3_file_missing`" do
+      upload_1 =
+        Fabricate(:upload_s3, verification_status: Upload.verification_statuses[:invalid_etag])
+
+      upload_2 =
+        Fabricate(:upload_s3, verification_status: Upload.verification_statuses[:invalid_etag])
+
+      upload_3 = Fabricate(:upload_s3, verification_status: Upload.verification_statuses[:verified])
+
+      Upload.mark_invalid_s3_uploads_as_missing
+
+      expect(upload_1.reload.verification_status).to eq(
+        Upload.verification_statuses[:s3_file_missing_confirmed],
+      )
+
+      expect(upload_2.reload.verification_status).to eq(
+        Upload.verification_statuses[:s3_file_missing_confirmed],
+      )
+
+      expect(upload_3.reload.verification_status).to eq(Upload.verification_statuses[:verified])
     end
   end
 end

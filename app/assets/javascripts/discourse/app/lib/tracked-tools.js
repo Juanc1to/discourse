@@ -1,4 +1,6 @@
 import { tracked } from "@glimmer/tracking";
+import { next } from "@ember/runloop";
+import { TrackedArray, TrackedSet } from "@ember-compat/tracked-built-ins";
 
 /**
  * Define a tracked property on an object without needing to use the @tracked decorator.
@@ -71,6 +73,164 @@ export function resettableTracked(prototype, key, descriptor) {
     set(value) {
       const state = getOrCreateState(states, this);
       state.currentValue = value;
+    },
+  };
+}
+
+/**
+ * @decorator
+ *
+ * Same as `@tracked`, but skips notifying about updates if the value is unchanged. This introduces some
+ * performance overhead, so should only be used where excessive downstream re-evaluations are a problem.
+ *
+ * @example
+ *
+ * ```js
+ * class UserRenameForm {
+ *   ⁣@dedupeTracked fullName;
+ * }
+ *
+ * const form = new UserRenameForm();
+ * form.fullName = "Alice"; // Downstream consumers will be notified
+ * form.fullName = "Alice"; // Downstream consumers will not be re-notified
+ * form.fullName = "Bob"; // Downstream consumers will be notified
+ * ```
+ *
+ */
+export function dedupeTracked(target, key, desc) {
+  let { initializer } = desc;
+  let { get, set } = tracked(target, key, desc);
+
+  let values = new WeakMap();
+
+  return {
+    get() {
+      if (!values.has(this)) {
+        let value = initializer?.call(this);
+        values.set(this, value);
+        set.call(this, value);
+      }
+
+      return get.call(this);
+    },
+
+    set(value) {
+      if (!values.has(this) || values.get(this) !== value) {
+        values.set(this, value);
+        set.call(this, value);
+      }
+    },
+  };
+}
+
+export class DeferredTrackedSet {
+  #set;
+
+  constructor(value) {
+    this.#set = new TrackedSet(value);
+  }
+
+  has(value) {
+    return this.#set.has(value);
+  }
+
+  entries() {
+    return this.#set.entries();
+  }
+
+  keys() {
+    return this.#set.keys();
+  }
+
+  values() {
+    return this.#set.values();
+  }
+
+  forEach(fn) {
+    return this.#set.forEach(fn);
+  }
+
+  get size() {
+    return this.#set.size;
+  }
+
+  [Symbol.iterator]() {
+    return this.#set[Symbol.iterator]();
+  }
+
+  get [Symbol.toStringTag]() {
+    return this.#set[Symbol.toStringTag];
+  }
+
+  add(value) {
+    next(() => this.#set.add(value));
+    return this;
+  }
+
+  delete(value) {
+    next(() => this.#set.delete(value));
+    return this;
+  }
+
+  clear() {
+    next(() => this.#set.clear());
+  }
+}
+
+/**
+ * Converts a value to TrackedArray if needed and validates the type
+ *
+ * @param {*} value - Value to convert
+ * @returns {TrackedArray|null} Converted value
+ * @throws {Error} If value is not an array, TrackedArray, or null
+ */
+function ensureTrackedArray(value) {
+  if (value === null) {
+    return null;
+  }
+
+  if (value instanceof TrackedArray) {
+    return value;
+  }
+
+  if (Array.isArray(value)) {
+    return new TrackedArray(value);
+  }
+
+  throw new Error(`Expected an array or TrackedArray, got ${typeof value}`);
+}
+
+/**
+ * @decorator
+ * Same as @tracked, but initializes the value as a TrackedArray.
+ *
+ * @param {Object} target - The target object
+ * @param {string|Symbol} key - The property key
+ * @param {Object} desc - The property descriptor
+ * @returns {Object} Modified property descriptor that wraps arrays in TrackedArray
+ *
+ * @example
+ * class TodoList {
+ *   @trackedArray todos = ['Buy milk', 'Walk dog'];
+ * }
+ */
+export function trackedArray(target, key, desc) {
+  if (desc.initializer) {
+    const originalInitializer = desc.initializer;
+    desc.initializer = function () {
+      const initialValue = originalInitializer.apply(this);
+      return ensureTrackedArray(initialValue);
+    };
+  }
+
+  const { get, set } = tracked(target, key, desc);
+
+  return {
+    get() {
+      return get.call(this);
+    },
+    set(value) {
+      set.call(this, ensureTrackedArray(value));
     },
   };
 }

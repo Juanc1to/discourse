@@ -43,28 +43,28 @@ RSpec.describe TopicUser do
 
   describe "#notification_levels" do
     context "when verifying enum sequence" do
-      before { @notification_levels = TopicUser.notification_levels }
+      let(:notification_levels) { TopicUser.notification_levels }
 
       it "'muted' should be at 0 position" do
-        expect(@notification_levels[:muted]).to eq(0)
+        expect(notification_levels[:muted]).to eq(0)
       end
 
       it "'watching' should be at 3rd position" do
-        expect(@notification_levels[:watching]).to eq(3)
+        expect(notification_levels[:watching]).to eq(3)
       end
     end
   end
 
   describe "#notification_reasons" do
     context "when verifying enum sequence" do
-      before { @notification_reasons = TopicUser.notification_reasons }
+      let(:notification_reasons) { TopicUser.notification_reasons }
 
       it "'created_topic' should be at 1st position" do
-        expect(@notification_reasons[:created_topic]).to eq(1)
+        expect(notification_reasons[:created_topic]).to eq(1)
       end
 
       it "'plugin_changed' should be at 9th position" do
-        expect(@notification_reasons[:plugin_changed]).to eq(9)
+        expect(notification_reasons[:plugin_changed]).to eq(9)
       end
     end
   end
@@ -186,23 +186,33 @@ RSpec.describe TopicUser do
   end
 
   describe "visited at" do
-    it "set upon initial visit" do
+    it "set upon initial visit and fires DiscourseEvent" do
       freeze_time yesterday
 
-      TopicUser.track_visit!(topic.id, user.id)
+      event =
+        DiscourseEvent
+          .track_events(:user_first_visit_to_topic) { TopicUser.track_visit!(topic.id, user.id) }
+          .first
+      expect(event[:params].first[:user_id]).to eq(user.id)
+      expect(event[:params].first[:topic_id]).to eq(topic.id)
 
       expect(topic_user.first_visited_at.to_i).to eq(yesterday.to_i)
       expect(topic_user.last_visited_at.to_i).to eq(yesterday.to_i)
     end
 
-    it "updates upon repeat visit" do
+    it "updates upon repeat visit and doesn't fire DiscourseEvent" do
       freeze_time yesterday
 
       TopicUser.track_visit!(topic.id, user.id)
 
       freeze_time Time.zone.now
 
-      TopicUser.track_visit!(topic.id, user.id)
+      events =
+        DiscourseEvent.track_events(:user_first_visit_to_topic) do
+          TopicUser.track_visit!(topic.id, user.id)
+        end
+      expect(events).to be_blank
+
       # reload is a no go
       topic_user = TopicUser.get(topic, user)
       expect(topic_user.first_visited_at.to_i).to eq(yesterday.to_i)
@@ -226,7 +236,13 @@ RSpec.describe TopicUser do
 
       it "should update the record for repeat visit" do
         today = Time.zone.now
-        freeze_time Time.zone.now
+        freeze_time today
+
+        # ensure data model is correct for the test
+        # logging an update to a row that does not exist
+        # is not supported
+        _post1 = Fabricate(:post, topic: topic)
+        _post2 = Fabricate(:post, topic: topic)
 
         TopicUser.update_last_read(user, topic.id, 1, 1, 0)
 

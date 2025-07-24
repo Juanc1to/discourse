@@ -1,7 +1,5 @@
 # frozen_string_literal: true
 
-require "rails_helper"
-
 RSpec.describe Chat::Api::ChannelsController do
   before do
     SiteSetting.chat_enabled = true
@@ -18,7 +16,7 @@ RSpec.describe Chat::Api::ChannelsController do
     end
 
     context "as disallowed user" do
-      fab!(:current_user) { Fabricate(:user) }
+      fab!(:current_user, :user)
 
       before do
         SiteSetting.chat_allowed_groups = Group::AUTO_GROUPS[:staff]
@@ -33,13 +31,13 @@ RSpec.describe Chat::Api::ChannelsController do
     end
 
     context "as allowed user" do
-      fab!(:current_user) { Fabricate(:user) }
+      fab!(:current_user, :user)
 
       before { sign_in(current_user) }
 
       context "with category channels" do
         context "when channel is public" do
-          fab!(:channel_1) { Fabricate(:category_channel) }
+          fab!(:channel_1, :category_channel)
 
           it "returns the channel" do
             get "/chat/api/channels"
@@ -63,7 +61,7 @@ RSpec.describe Chat::Api::ChannelsController do
         end
 
         context "when channel has limited access" do
-          fab!(:group_1) { Fabricate(:group) }
+          fab!(:group_1, :group)
           fab!(:channel_1) { Fabricate(:private_category_channel, group: group_1) }
 
           context "when user has access" do
@@ -124,7 +122,7 @@ RSpec.describe Chat::Api::ChannelsController do
     end
 
     context "when user cannot access channel" do
-      fab!(:channel_1) { Fabricate(:private_category_channel) }
+      fab!(:channel_1, :private_category_channel)
 
       before { sign_in(Fabricate(:user)) }
 
@@ -136,7 +134,7 @@ RSpec.describe Chat::Api::ChannelsController do
     end
 
     context "when user can access channel" do
-      fab!(:current_user) { Fabricate(:user) }
+      fab!(:current_user, :user)
 
       before { sign_in(current_user) }
 
@@ -149,7 +147,7 @@ RSpec.describe Chat::Api::ChannelsController do
       end
 
       context "when channel exists" do
-        fab!(:channel_1) { Fabricate(:category_channel) }
+        fab!(:channel_1, :category_channel)
 
         it "can find channel by id" do
           get "/chat/api/channels/#{channel_1.id}"
@@ -162,10 +160,10 @@ RSpec.describe Chat::Api::ChannelsController do
   end
 
   describe "#destroy" do
-    fab!(:channel_1) { Fabricate(:category_channel) }
+    fab!(:channel_1, :category_channel)
 
     context "when user is not staff" do
-      fab!(:current_user) { Fabricate(:user) }
+      fab!(:current_user, :user)
 
       before { sign_in(current_user) }
 
@@ -177,7 +175,7 @@ RSpec.describe Chat::Api::ChannelsController do
     end
 
     context "when user is admin" do
-      fab!(:current_user) { Fabricate(:admin) }
+      fab!(:current_user, :admin)
 
       before { sign_in(current_user) }
 
@@ -323,7 +321,7 @@ RSpec.describe Chat::Api::ChannelsController do
     end
 
     describe "triggers the auto-join process" do
-      fab!(:chatters_group) { Fabricate(:group) }
+      fab!(:chatters_group, :group)
       fab!(:user) { Fabricate(:user, last_seen_at: 15.minute.ago) }
 
       before do
@@ -370,7 +368,7 @@ RSpec.describe Chat::Api::ChannelsController do
     include_examples "channel access example", :put
 
     context "when user can’t edit channel" do
-      fab!(:channel) { Fabricate(:category_channel) }
+      fab!(:channel, :category_channel)
 
       before { sign_in(Fabricate(:user)) }
 
@@ -400,7 +398,7 @@ RSpec.describe Chat::Api::ChannelsController do
     end
 
     context "when user provided an empty name" do
-      fab!(:user) { Fabricate(:admin) }
+      fab!(:user, :admin)
       fab!(:channel) do
         Fabricate(:category_channel, name: "something", description: "something else")
       end
@@ -421,7 +419,7 @@ RSpec.describe Chat::Api::ChannelsController do
     end
 
     context "when user provides an empty description" do
-      fab!(:user) { Fabricate(:admin) }
+      fab!(:user, :admin)
       fab!(:channel) do
         Fabricate(:category_channel, name: "something else", description: "something")
       end
@@ -442,7 +440,7 @@ RSpec.describe Chat::Api::ChannelsController do
     end
 
     context "when user provides an empty slug" do
-      fab!(:user) { Fabricate(:admin) }
+      fab!(:user, :admin)
       fab!(:channel) do
         Fabricate(:category_channel, name: "something else", description: "something")
       end
@@ -457,8 +455,8 @@ RSpec.describe Chat::Api::ChannelsController do
     end
 
     context "when channel is a direct message channel" do
-      fab!(:user) { Fabricate(:admin) }
-      fab!(:channel) { Fabricate(:direct_message_channel) }
+      fab!(:user, :admin)
+      fab!(:channel, :direct_message_channel)
 
       before { sign_in(user) }
 
@@ -470,8 +468,8 @@ RSpec.describe Chat::Api::ChannelsController do
     end
 
     context "when user provides valid params" do
-      fab!(:user) { Fabricate(:admin) }
-      fab!(:channel) { Fabricate(:category_channel) }
+      fab!(:user, :admin)
+      fab!(:channel, :category_channel)
 
       before { sign_in(user) }
 
@@ -556,7 +554,7 @@ RSpec.describe Chat::Api::ChannelsController do
         end
 
         describe "triggers the auto-join process" do
-          fab!(:chatters_group) { Fabricate(:group) }
+          fab!(:chatters_group, :group)
           fab!(:another_user) { Fabricate(:user, last_seen_at: 15.minute.ago) }
 
           before do

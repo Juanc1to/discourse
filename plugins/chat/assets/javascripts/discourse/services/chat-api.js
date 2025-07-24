@@ -1,4 +1,4 @@
-import Service, { inject as service } from "@ember/service";
+import Service, { service } from "@ember/service";
 import { ajax } from "discourse/lib/ajax";
 import UserChatChannelMembership from "discourse/plugins/chat/discourse/models/user-chat-channel-membership";
 import Collection from "../lib/collection";
@@ -216,6 +216,18 @@ export default class ChatApi extends Service {
   }
 
   /**
+   * Trashes (soft deletes) multiple chat messages.
+   * @param {number} channelId - ID of the channel.
+   * @param {Array.<number>} messageIds - IDs of the messages to delete.
+   * @returns {Promise}
+   */
+  trashMessages(channelId, messageIds) {
+    return this.#deleteRequest(`/channels/${channelId}/messages`, {
+      message_ids: messageIds,
+    });
+  }
+
+  /**
    * Creates a channel archive.
    * @param {number} channelId - The ID of the channel.
    * @param {object} data - Params of the archive.
@@ -257,6 +269,21 @@ export default class ChatApi extends Service {
       title: data.title,
       original_message_id: originalMessageId,
     });
+  }
+
+  /**
+   * Creates a message interaction.
+   * @param {number} channelId - The ID of the channel.
+   * @param {number} messageId - The ID of the message.
+   * @param {object} data - Params of the interaction.
+   * @param {string} data.action_id - The ID of the action.
+   * @returns {Promise}
+   */
+  createInteraction(channelId, messageId, data = {}) {
+    return this.#postRequest(
+      `/channels/${channelId}/messages/${messageId}/interactions`,
+      data
+    );
   }
 
   /**
@@ -322,8 +349,14 @@ export default class ChatApi extends Service {
    * @param {number} channelId - The ID of the channel.
    * @returns {Promise}
    */
-  leaveChannel(channelId) {
-    return this.#deleteRequest(`/channels/${channelId}/memberships/me`);
+  async leaveChannel(channelId) {
+    await this.#deleteRequest(`/channels/${channelId}/memberships/me`);
+    const channel = await this.chatChannelsManager.find(channelId, {
+      fetchIfNotFound: false,
+    });
+    if (channel) {
+      this.chatChannelsManager.remove(channel);
+    }
   }
 
   /**
@@ -340,8 +373,7 @@ export default class ChatApi extends Service {
    * @param {number} channelId - The ID of the channel.
    * @param {object} data - The settings to modify.
    * @param {boolean} [data.muted] - Mutes the channel.
-   * @param {string} [data.desktop_notification_level] - Notifications level on desktop: never, mention or always.
-   * @param {string} [data.mobile_notification_level] - Notifications level on mobile: never, mention or always.
+   * @param {string} [data.notification_level] - Notifications level: never, mention or always.
    * @returns {Promise}
    */
   updateCurrentUserChannelNotificationsSettings(channelId, data = {}) {
@@ -364,6 +396,18 @@ export default class ChatApi extends Service {
     return this.#putRequest(
       `/channels/${channelId}/threads/${threadId}/notifications-settings/me`,
       { notification_level: data.notificationLevel }
+    );
+  }
+
+  /**
+   * Update thread title prompt of current user for a thread.
+   * @param {number} channelId - The ID of the channel.
+   * @param {number} threadId - The ID of the thread.
+   * @returns {Promise}
+   */
+  updateCurrentUserThreadTitlePrompt(channelId, threadId) {
+    return this.#postRequest(
+      `/channels/${channelId}/threads/${threadId}/mark-thread-title-prompt-seen/me`
     );
   }
 
@@ -487,21 +531,25 @@ export default class ChatApi extends Service {
    * @returns {Promise}
    */
   markChannelAsRead(channelId, messageId = null) {
-    return this.#putRequest(`/channels/${channelId}/read/${messageId}`);
+    return this.#putRequest(
+      `/channels/${channelId}/read?message_id=${messageId}`
+    );
   }
 
   /**
-   * Marks all messages and mentions in a thread as read. This is quite
-   * far-reaching for now, and is not granular since there is no membership/
-   * read state per-user for threads. In future this will be expanded to
-   * also pass message ID in the same way as markChannelAsRead
+   * Marks messages for a single user chat thread membership as read. If no
+   * message ID is provided, then the latest message for the channel is fetched
+   * on the server and used for the last read message.
    *
    * @param {number} channelId - The ID of the channel for the thread being marked as read.
    * @param {number} threadId - The ID of the thread being marked as read.
+   * @param {number} messageId - The ID of the message being marked as read.
    * @returns {Promise}
    */
-  markThreadAsRead(channelId, threadId) {
-    return this.#putRequest(`/channels/${channelId}/threads/${threadId}/read`);
+  markThreadAsRead(channelId, threadId, messageId) {
+    return this.#putRequest(
+      `/channels/${channelId}/threads/${threadId}/read?message_id=${messageId}`
+    );
   }
 
   /**
@@ -545,17 +593,6 @@ export default class ChatApi extends Service {
   }
 
   /**
-   * Summarize a channel.
-   *
-   * @param {number} channelId - The ID of the channel to summarize.
-   * @param {object} options
-   * @param {number} options.since - Number of hours ago the summary should start (1, 3, 6, 12, 24, 72, 168).
-   */
-  summarize(channelId, options = {}) {
-    return this.#getRequest(`/channels/${channelId}/summarize`, options);
-  }
-
-  /**
    * Add members to a channel.
    *
    * @param {number} channelId - The ID of the channel.
@@ -568,6 +605,16 @@ export default class ChatApi extends Service {
       usernames: targets.usernames,
       groups: targets.groups,
     });
+  }
+
+  /**
+   * Remove member from a channel.
+   *
+   * @param {number} channelId - The ID of the channel.
+   * @param {string} userId - The ID of the user to remove.
+   */
+  removeMemberFromChannel(channelId, userId) {
+    return this.#deleteRequest(`/channels/${channelId}/memberships/${userId}`);
   }
 
   get #basePath() {

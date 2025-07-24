@@ -81,7 +81,7 @@ class FinalDestination
     @user_agent =
       (
         if @force_custom_user_agent_hosts.any? { |host| hostname_matches?(host) }
-          Onebox.options.user_agent
+          Onebox::Helpers.user_agent
         else
           @default_user_agent
         end
@@ -156,7 +156,7 @@ class FinalDestination
 
   # this is a new interface for simply getting
   # N bytes accounting for all internal logic
-  def get(redirects = @limit, extra_headers: {}, &blk)
+  def get(redirects = @limit, extra_headers: {}, except_headers: [], &blk)
     raise "Must specify block" unless block_given?
 
     if @uri && @uri.port == 80 && FinalDestination.is_https_domain?(@uri.hostname)
@@ -167,7 +167,7 @@ class FinalDestination
     return if !validate_uri
     return if @stop_at_blocked_pages && blocked_domain?(@uri)
 
-    result, headers_subset = safe_get(@uri, &blk)
+    result, headers_subset = safe_get(@uri, except_headers:, &blk)
     return if !result
 
     cookie = headers_subset.set_cookie
@@ -198,7 +198,12 @@ class FinalDestination
       extra = nil
       extra = { "Cookie" => cookie } if cookie
 
-      get(redirects - 1, extra_headers: extra, &blk)
+      # Most HTTP Clients strip the Authorization header on redirects as the client could be redirecting to a untrusted
+      # party. Not stripping the Authorization header on redirect can also lead to problems where the
+      # redirected party does not expect a Authorization header and thus rejects the request.
+      except_headers = ["Authorization"]
+
+      get(redirects - 1, extra_headers: extra, except_headers:, &blk)
     elsif result == :ok
       @uri.to_s
     else
@@ -229,11 +234,6 @@ class FinalDestination
         @status = :resolved
         return @uri
       end
-    end
-
-    if Oneboxer.cached_response_body_exists?(@uri.to_s)
-      @status = :resolved
-      return @uri
     end
 
     headers = request_headers
@@ -289,13 +289,6 @@ class FinalDestination
 
     case response.status
     when 200
-      # Cache body of successful `get` requests
-      if @http_verb == :get
-        if Oneboxer.cache_response_body?(@uri)
-          Oneboxer.cache_response_body(@uri.to_s, response_body)
-        end
-      end
-
       if @follow_canonical
         next_url = fetch_canonical_url(response_body)
 
@@ -402,7 +395,7 @@ class FinalDestination
 
   def validate_uri_format
     return false unless @uri && @uri.host
-    return false unless %w[https http].include?(@uri.scheme)
+    return false if %w[https http].exclude?(@uri.scheme)
 
     # In some cases (like local/test environments) we may want to allow http URLs
     # to be used for internal hosts, but only if it's the case that the host is
@@ -478,7 +471,7 @@ class FinalDestination
 
   protected
 
-  def safe_get(uri)
+  def safe_get(uri, except_headers: [])
     result = nil
     unsafe_close = false
     headers_subset = Struct.new(:location, :set_cookie).new
@@ -488,7 +481,7 @@ class FinalDestination
         request_headers.merge(
           "Accept-Encoding" => "gzip",
           "Host" => uri.hostname + (@include_port_in_host_header ? ":#{uri.port}" : ""),
-        )
+        ).except(*except_headers)
 
       req = FinalDestination::HTTP::Get.new(uri.request_uri, headers)
 

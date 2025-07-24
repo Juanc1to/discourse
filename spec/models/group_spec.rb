@@ -8,10 +8,6 @@ RSpec.describe Group do
   it_behaves_like "it has custom fields"
 
   describe "Validations" do
-    it { is_expected.to allow_value("#{"a" * 996}.com").for(:automatic_membership_email_domains) }
-    it do
-      is_expected.not_to allow_value("#{"a" * 997}.com").for(:automatic_membership_email_domains)
-    end
     it { is_expected.to validate_length_of(:bio_raw).is_at_most(3000) }
     it { is_expected.to validate_length_of(:membership_request_template).is_at_most(5000) }
     it { is_expected.to validate_length_of(:full_name).is_at_most(100) }
@@ -51,6 +47,17 @@ RSpec.describe Group do
 
           expect(new_group.errors.full_messages.first).to include(
             I18n.t("activerecord.errors.messages.taken"),
+          )
+        end
+      end
+
+      context "when a group with a reserved name is created" do
+        it "should not be valid" do
+          new_group = Fabricate.build(:group, name: "by-id")
+          expect(new_group).to_not be_valid
+
+          expect(new_group.errors.full_messages.first).to include(
+            I18n.t("activerecord.errors.messages.reserved", name: "by-id"),
           )
         end
       end
@@ -94,16 +101,39 @@ RSpec.describe Group do
     end
   end
 
+  describe "#set_message_default_notification_levels!" do
+    context "with too many users in a group" do
+      fab!(:topic)
+      fab!(:large_group) { Fabricate(:group, messageable_level: Group::ALIAS_LEVELS[:everyone]) }
+
+      before do
+        SiteSetting.group_pm_user_limit = 1
+        Fabricate.times(2, :user).each { |user| large_group.add(user) }
+      end
+
+      it "raises a GroupPmUserLimitExceededError error" do
+        expect do
+          large_group.reload.set_message_default_notification_levels!(topic)
+        end.to raise_error(
+          Group::GroupPmUserLimitExceededError,
+          I18n.t(
+            "groups.errors.default_notification_level_users_limit",
+            count: SiteSetting.group_pm_user_limit,
+            group_name: large_group.name,
+          ),
+        )
+      end
+    end
+  end
+
   describe "#builtin" do
     context "when verifying enum sequence" do
-      before { @builtin = Group.builtin }
-
       it "'moderators' should be at 1st position" do
-        expect(@builtin[:moderators]).to eq(1)
+        expect(described_class.builtin[:moderators]).to eq(1)
       end
 
       it "'trust_level_2' should be at 4th position" do
-        expect(@builtin[:trust_level_2]).to eq(4)
+        expect(described_class.builtin[:trust_level_2]).to eq(4)
       end
     end
   end
@@ -151,6 +181,17 @@ RSpec.describe Group do
     it "is valid for proper domains" do
       group.automatic_membership_email_domains = "discourse.org|wikipedia.org"
       expect(group.valid?).to eq true
+    end
+
+    it "is invalid for too many domains" do
+      SiteSetting.max_automatic_membership_email_domains = 1
+      group.automatic_membership_email_domains = "discourse.org|wikipedia.org"
+      expect(group).not_to be_valid
+    end
+
+    it "is invalid for too abnormally long domains" do
+      group.automatic_membership_email_domains = "#{"d" * 253}.org"
+      expect(group).not_to be_valid
     end
 
     it "is valid for newer TLDs" do
@@ -393,6 +434,19 @@ RSpec.describe Group do
       expect(group.name).to_not eq("staff")
       expect(group.name).to eq(I18n.t("groups.default_names.staff", locale: "de"))
     end
+
+    it "can save groups" do
+      # Update all short usernames to ensure that the future minimum username
+      # length is met for all existing usernames
+      User.find_each { |u| u.update!(username: u.username * 2) }
+
+      # This a corner case when a group has a short name that is technically no
+      # longer allowed by `min_username_length`
+      Group.find(Group::AUTO_GROUPS[:everyone]).update!(name: "all")
+      SiteSetting.min_username_length = 10
+
+      expect { Group.refresh_automatic_groups! }.not_to raise_error
+    end
   end
 
   it "Correctly handles removal of primary group" do
@@ -507,7 +561,7 @@ RSpec.describe Group do
 
     g = Group[:trust_level_2]
     expect(g.human_users.count).to eq(g.user_count)
-    expect(g.human_users).to contain_exactly(user)
+    expect(g.human_users).to contain_exactly(admin, user)
   end
 
   it "can set members via usernames helper" do
@@ -775,6 +829,32 @@ RSpec.describe Group do
   describe ".visible_groups" do
     def can_view?(user, group)
       Group.visible_groups(user).where(id: group.id).exists?
+    end
+
+    it "includes everyone group when option is present" do
+      expect(
+        Group
+          .visible_groups(admin, [], include_everyone: true)
+          .where(id: Group::AUTO_GROUPS[:everyone])
+          .exists?,
+      ).to eq(true)
+    end
+
+    it "doesn't include everyones group by default" do
+      expect(
+        Group
+          .visible_groups(admin, [], include_everyone: false)
+          .where(id: Group::AUTO_GROUPS[:everyone])
+          .exists?,
+      ).to eq(false)
+
+      expect(
+        Group.visible_groups(admin, [], nil).where(id: Group::AUTO_GROUPS[:everyone]).exists?,
+      ).to eq(false)
+
+      expect(
+        Group.visible_groups(admin, [], {}).where(id: Group::AUTO_GROUPS[:everyone]).exists?,
+      ).to eq(false)
     end
 
     it "correctly restricts group visibility" do
@@ -1164,17 +1244,18 @@ RSpec.describe Group do
 
   describe "IMAP" do
     let(:group) { Fabricate(:group) }
+    let(:mocked_imap_provider) do
+      MockedImapProvider.new(
+        group.imap_server,
+        port: group.imap_port,
+        ssl: group.imap_ssl,
+        username: group.email_username,
+        password: group.email_password,
+      )
+    end
 
     def mock_imap
-      @mocked_imap_provider =
-        MockedImapProvider.new(
-          group.imap_server,
-          port: group.imap_port,
-          ssl: group.imap_ssl,
-          username: group.email_username,
-          password: group.email_password,
-        )
-      Imap::Providers::Detector.stubs(:init_with_detected_provider).returns(@mocked_imap_provider)
+      Imap::Providers::Detector.stubs(:init_with_detected_provider).returns(mocked_imap_provider)
     end
 
     def configure_imap
@@ -1190,12 +1271,12 @@ RSpec.describe Group do
 
     def enable_imap
       SiteSetting.enable_imap = true
-      @mocked_imap_provider.stubs(:connect!)
-      @mocked_imap_provider.stubs(:list_mailboxes_with_attributes).returns(
+      mocked_imap_provider.stubs(:connect!)
+      mocked_imap_provider.stubs(:list_mailboxes_with_attributes).returns(
         [stub(attr: [], name: "Inbox")],
       )
-      @mocked_imap_provider.stubs(:list_mailboxes).returns(["Inbox"])
-      @mocked_imap_provider.stubs(:disconnect!)
+      mocked_imap_provider.stubs(:list_mailboxes).returns(["Inbox"])
+      mocked_imap_provider.stubs(:disconnect!)
     end
 
     before { Discourse.redis.del("group_imap_mailboxes_#{group.id}") }
@@ -1215,7 +1296,7 @@ RSpec.describe Group do
         configure_imap
         mock_imap
         SiteSetting.enable_imap = true
-        @mocked_imap_provider.stubs(:connect!).raises(Net::IMAP::NoResponseError)
+        mocked_imap_provider.stubs(:connect!).raises(Net::IMAP::NoResponseError)
         group.imap_mailboxes
         expect(group.reload.imap_last_error).not_to eq(nil)
       end
@@ -1355,6 +1436,24 @@ RSpec.describe Group do
       expect(GroupTagNotificationDefault.lookup(group, :watching)).to be_empty
     end
 
+    it "can change the notification level for a tag" do
+      GroupTagNotificationDefault.create!(
+        group: group,
+        tag: tag1,
+        notification_level: GroupTagNotificationDefault.notification_levels[:watching],
+      )
+
+      group.watching_tags = [tag1.name]
+      group.save!
+      expect(GroupTagNotificationDefault.lookup(group, :watching).pluck(:tag_id)).to eq([tag1.id])
+
+      group.watching_tags = []
+      group.tracking_tags = [tag1.name]
+      group.save!
+      expect(GroupTagNotificationDefault.lookup(group, :watching)).to be_empty
+      expect(GroupTagNotificationDefault.lookup(group, :tracking).pluck(:tag_id)).to eq([tag1.id])
+    end
+
     it "can apply default notifications for admins group" do
       group = Group.find(Group::AUTO_GROUPS[:admins])
       group.tracking_category_ids = [category1.id]
@@ -1397,7 +1496,7 @@ RSpec.describe Group do
     it "enables smtp and records the change" do
       group.update(
         smtp_port: 587,
-        smtp_ssl: true,
+        smtp_ssl_mode: Group.smtp_ssl_modes[:starttls],
         smtp_server: "smtp.gmail.com",
         email_username: "test@gmail.com",
         email_password: "password",
@@ -1414,7 +1513,7 @@ RSpec.describe Group do
     it "records the change for singular setting changes" do
       group.update(
         smtp_port: 587,
-        smtp_ssl: true,
+        smtp_ssl_mode: Group.smtp_ssl_modes[:starttls],
         smtp_server: "smtp.gmail.com",
         email_username: "test@gmail.com",
         email_password: "password",
@@ -1448,7 +1547,7 @@ RSpec.describe Group do
     it "disables smtp and records the change" do
       group.update(
         smtp_port: 587,
-        smtp_ssl: true,
+        smtp_ssl_mode: Group.smtp_ssl_modes[:starttls],
         smtp_server: "smtp.gmail.com",
         email_username: "test@gmail.com",
         email_password: "password",
@@ -1460,7 +1559,7 @@ RSpec.describe Group do
 
       group.update(
         smtp_port: nil,
-        smtp_ssl: false,
+        smtp_ssl_mode: Group.smtp_ssl_modes[:none],
         smtp_server: nil,
         email_username: nil,
         email_password: nil,

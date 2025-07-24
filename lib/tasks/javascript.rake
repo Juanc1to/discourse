@@ -46,7 +46,7 @@ def write_template(path, task_name, template)
 
   File.write(output_path, "#{header}\n\n#{template}")
   puts "#{basename} created"
-  `yarn run prettier --write #{output_path}`
+  system("pnpm prettier --write #{output_path}", exception: true)
   puts "#{basename} prettified"
 end
 
@@ -59,33 +59,16 @@ def write_hbs_template(path, task_name, template)
   basename = File.basename(path)
   output_path = "#{Rails.root}/app/assets/javascripts/#{path}"
   File.write(output_path, "#{header}\n#{template}")
-  `yarn run prettier --write #{output_path}`
+  system("pnpm prettier --write #{output_path}", exception: true)
   puts "#{basename} created"
 end
 
 def dependencies
   [
-    { source: "ace-builds/src-min-noconflict/ace.js", destination: "ace.js", public: true },
-    {
-      source: "@json-editor/json-editor/dist/jsoneditor.js",
-      package_name: "@json-editor/json-editor",
-      public: true,
-    },
     { source: "chart.js/dist/chart.min.js", public: true },
     { source: "chartjs-plugin-datalabels/dist/chartjs-plugin-datalabels.min.js", public: true },
-    { source: "diffhtml/dist/diffhtml.min.js", public: true },
     { source: "magnific-popup/dist/jquery.magnific-popup.min.js", public: true },
     { source: "pikaday/pikaday.js", public: true },
-    { source: "moment/moment.js" },
-    { source: "moment/locale/.", destination: "moment-locale" },
-    {
-      source: "moment-timezone/builds/moment-timezone-with-data-10-year-range.js",
-      destination: "moment-timezone-with-data.js",
-    },
-    {
-      source: "@discourse/moment-timezone-names-translations/locales/.",
-      destination: "moment-timezone-names-locale",
-    },
     {
       source: "squoosh/codecs/mozjpeg/enc/mozjpeg_enc.js",
       destination: "squoosh",
@@ -144,6 +127,30 @@ task "javascript:update_constants" => :environment do
       )
     end
 
+  MAIN_FONT_KEYS = %w[helvetica inter lato montserrat open_sans poppins roboto merriweather mukta]
+
+  write_template("admin/addon/lib/constants.js", task_name, <<~JS)
+    export const ADMIN_SEARCH_RESULT_TYPES = #{Admin::SearchController::RESULT_TYPES.to_json};
+
+    export const SITE_SETTING_REQUIRES_CONFIRMATION_TYPES = #{SiteSettings::TypeSupervisor::REQUIRES_CONFIRMATION_TYPES.to_json};
+
+    export const API_KEY_SCOPE_MODES = #{ApiKey.scope_modes.keys.to_json}
+
+    export const SYSTEM_FLAG_IDS = #{PostActionType.types.to_json};
+
+    export const REPORT_MODES = #{Report::MODES.to_json};
+
+    export const USER_FIELD_FLAGS = #{UserField::FLAG_ATTRIBUTES};
+
+    export const DEFAULT_USER_PREFERENCES = #{SiteSetting::DEFAULT_USER_PREFERENCES.to_json};
+
+    export const MAIN_FONTS = #{DiscourseFonts.fonts.filter { |font| MAIN_FONT_KEYS.include?(font[:key]) }.map { |font| { key: font[:key], name: font[:name] } }.to_json}
+
+    export const MORE_FONTS = #{DiscourseFonts.fonts.reject { |font| MAIN_FONT_KEYS.include?(font[:key]) }.map { |font| { key: font[:key], name: font[:name] } }.to_json}
+
+    export const DEFAULT_TEXT_SIZES = #{DefaultTextSizeSetting::DEFAULT_TEXT_SIZES}
+  JS
+
   write_template("discourse/app/lib/constants.js", task_name, <<~JS)
     export const SEARCH_PRIORITIES = #{Searchable::PRIORITIES.to_json};
 
@@ -159,9 +166,29 @@ task "javascript:update_constants" => :environment do
       max_title_length: #{SidebarSection::MAX_TITLE_LENGTH},
     }
 
+    export const CATEGORY_STYLE_TYPES = #{Category.style_types.to_json};
+
+    export const CATEGORY_TEXT_COLORS = #{Category::DEFAULT_TEXT_COLORS};
+
     export const AUTO_GROUPS = #{auto_groups.to_json};
 
+    export const GROUP_SMTP_SSL_MODES = #{Group.smtp_ssl_modes.to_json};
+
+    export const MAX_AUTO_MEMBERSHIP_DOMAINS_LOOKUP = #{Admin::GroupsController::MAX_AUTO_MEMBERSHIP_DOMAINS_LOOKUP};
+
     export const MAX_NOTIFICATIONS_LIMIT_PARAMS = #{NotificationsController::INDEX_LIMIT};
+
+    export const TOPIC_VISIBILITY_REASONS = #{Topic.visibility_reasons.to_json};
+
+    export const MAX_UNOPTIMIZED_CATEGORIES = #{CategoryList::MAX_UNOPTIMIZED_CATEGORIES};
+
+    export const REVIEWABLE_UNKNOWN_TYPE_SOURCE = "#{Reviewable::UNKNOWN_TYPE_SOURCE}";
+
+    export const ADMIN_SEARCH_RESULT_TYPES = #{Admin::SearchController::RESULT_TYPES.to_json};
+
+    export const API_KEY_SCOPE_MODES = #{ApiKey.scope_modes.keys.to_json};
+
+    export const INVITE_DESCRIPTION_MAX_LENGTH = #{Invite::DESCRIPTION_MAX_LENGTH};
   JS
 
   pretty_notifications = Notification.types.map { |n| "  #{n[0]}: #{n[1]}," }.join("\n")
@@ -173,10 +200,9 @@ task "javascript:update_constants" => :environment do
   JS
 
   write_template("pretty-text/addon/emoji/data.js", task_name, <<~JS)
-    export const emojis = #{Emoji.standard.map(&:name).flatten.inspect};
+    export const emojis = new Set(#{Emoji.standard.map(&:name).flatten.inspect});
     export const tonableEmojis = #{Emoji.tonable_emojis.flatten.inspect};
     export const aliases = #{Emoji.aliases.inspect.gsub("=>", ":")};
-    export const searchAliases = #{Emoji.search_aliases.inspect.gsub("=>", ":")};
     export const translations = #{Emoji.translations.inspect.gsub("=>", ":")};
     export const replacements = #{Emoji.unicode_replacements_json};
   JS
@@ -184,27 +210,12 @@ task "javascript:update_constants" => :environment do
   write_template("pretty-text/addon/emoji/version.js", task_name, <<~JS)
     export const IMAGE_VERSION = "#{Emoji::EMOJI_VERSION}";
   JS
-
-  groups_json = JSON.parse(File.read("lib/emoji/groups.json"))
-
-  emoji_buttons = groups_json.map { |group| <<~HTML }
-			<button type="button" data-section="#{group["name"]}" {{on "click" (fn this.onCategorySelection "#{group["name"]}")}} class="btn btn-default category-button emoji">
-				 {{replace-emoji ":#{group["tabicon"]}:"}}
-			</button>
-    HTML
-
-  emoji_sections = groups_json.map { |group| html_for_section(group) }
-
-  components_dir = "discourse/app/components"
-  write_hbs_template("#{components_dir}/emoji-group-buttons.hbs", task_name, emoji_buttons.join)
-  write_hbs_template("#{components_dir}/emoji-group-sections.hbs", task_name, emoji_sections.join)
 end
 
 task "javascript:update" => "clean_up" do
   require "uglifier"
 
-  yarn = system("yarn install")
-  abort('Unable to run "yarn install"') unless yarn
+  system("pnpm install", exception: true)
 
   versions = {}
   start = Time.now
@@ -238,23 +249,6 @@ task "javascript:update" => "clean_up" do
       dest = "#{vendor_js}/#{filename}"
     end
 
-    if src.include? "ace.js"
-      versions["ace/ace.js"] = versions.delete("ace.js")
-      ace_root = "#{library_src}/ace-builds/src-min-noconflict/"
-      addtl_files = %w[
-        ext-searchbox
-        mode-html
-        mode-scss
-        mode-sql
-        mode-yaml
-        theme-chrome
-        theme-chaos
-        worker-html
-      ]
-      dest_path = dest.split("/")[0..-2].join("/")
-      addtl_files.each { |file| FileUtils.cp_r("#{ace_root}#{file}.js", dest_path) }
-    end
-
     STDERR.puts "New dependency added: #{dest}" unless File.exist?(dest)
 
     FileUtils.cp_r(src, dest)
@@ -276,7 +270,7 @@ task "javascript:clean_up" do
     next if processed.include?(package_dir_name)
 
     versions = Dir["#{File.join(public_js, package_dir_name)}/*"].collect { |p| p.split("/").last }
-    next unless versions.present?
+    next if versions.blank?
 
     versions = versions.sort { |a, b| Gem::Version.new(a) <=> Gem::Version.new(b) }
     puts "Keeping #{package_dir_name} version: #{versions[-1]}"

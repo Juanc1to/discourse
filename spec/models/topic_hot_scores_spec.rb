@@ -3,8 +3,10 @@
 RSpec.describe TopicHotScore do
   describe ".update_scores" do
     fab!(:user)
-    fab!(:user2) { Fabricate(:user) }
-    fab!(:user3) { Fabricate(:user) }
+    fab!(:user2, :user)
+    fab!(:user3, :user)
+
+    after { Discourse.cache.delete(described_class::CACHE_KEY) }
 
     it "also always updates based on recent activity" do
       freeze_time
@@ -29,7 +31,7 @@ RSpec.describe TopicHotScore do
     end
 
     it "can correctly update like counts and post counts and account for activity" do
-      freeze_time
+      freeze_time_safe
 
       TopicHotScore.create!(topic_id: -1, score: 0.0, recent_likes: 99, recent_posters: 0)
 
@@ -110,6 +112,49 @@ RSpec.describe TopicHotScore do
 
       expect(TopicHotScore.find_by(topic_id: topic1.id).score).to be_within(0.0001).of(0.0005)
       expect(TopicHotScore.find_by(topic_id: topic2.id).score).to be_within(0.001).of(0.001)
+    end
+
+    it "caches 10% of the hottest topic IDs" do
+      9.times { Fabricate(:topic, like_count: 3, last_posted_at: 10.minutes.ago) }
+      hottest_topic = Fabricate(:topic, like_count: 10, last_posted_at: 10.minutes.ago)
+
+      TopicHotScore.update_scores
+
+      expect(TopicHotScore.hottest_topic_ids).to contain_exactly(hottest_topic.id)
+
+      hottest_topic_2 = Fabricate(:topic, like_count: 100, last_posted_at: 10.minutes.ago)
+
+      TopicHotScore.update_scores
+
+      expect(TopicHotScore.hottest_topic_ids).to contain_exactly(hottest_topic_2.id)
+    end
+
+    it "ignores topics in the future" do
+      freeze_time
+
+      topic1 = Fabricate(:topic, like_count: 3, created_at: 2.days.from_now)
+      post1 = Fabricate(:post, topic: topic1, created_at: 1.minute.ago)
+      PostActionCreator.like(user, post1)
+      TopicHotScore.create!(topic_id: topic1.id, score: 0.0, recent_likes: 0, recent_posters: 0)
+
+      expect { TopicHotScore.update_scores }.not_to change {
+        TopicHotScore.where(topic_id: topic1.id).pluck(:recent_likes)
+      }
+    end
+
+    it "triggers an event after updating" do
+      triggered = false
+      blk = Proc.new { triggered = true }
+
+      begin
+        DiscourseEvent.on(:topic_hot_scores_updated, &blk)
+
+        TopicHotScore.update_scores
+
+        expect(triggered).to eq(true)
+      ensure
+        DiscourseEvent.off(:topic_hot_scores_updated, &blk)
+      end
     end
   end
 end

@@ -12,12 +12,12 @@ task "import:ensure_consistency" => :environment do
   insert_user_actions
   insert_user_options
   insert_user_profiles
-  insert_user_stats
+  insert_user_stats unless ENV["SKIP_USER_STATS"]
   insert_user_visits
   insert_draft_sequences
   insert_automatic_group_users
 
-  update_user_stats
+  update_user_stats unless ENV["SKIP_USER_STATS"]
   update_posts
   update_topics
   update_categories
@@ -33,7 +33,7 @@ task "import:ensure_consistency" => :environment do
   log "Done!"
 end
 
-MS_SPEND_CREATING_POST ||= 5000
+MS_SPEND_CREATING_POST = 5000
 
 # -- TODO: We need to check the queries are actually adding/updating the necessary
 # data, post migration. The ON CONFLICT DO NOTHING may cause the clauses to be ignored
@@ -97,6 +97,32 @@ def insert_topic_views
 end
 
 def insert_user_actions
+  log "Inserting user actions for LIKE = 1..."
+
+  DB.exec <<~SQL
+    INSERT INTO user_actions (action_type, user_id, target_topic_id, target_post_id, acting_user_id, created_at, updated_at)
+    SELECT 1 /* like */, pa.user_id, p.topic_id, p.id, pa.user_id, pa.created_at, pa.updated_at
+    FROM post_actions pa
+         JOIN posts p ON pa.post_id = p.id
+    WHERE pa.post_action_type_id = 2 /* like */
+      AND pa.deleted_at IS NULL
+      AND p.deleted_at IS NULL
+    ON CONFLICT DO NOTHING
+  SQL
+
+  log "Inserting user actions for WAS_LIKED = 2..."
+
+  DB.exec <<~SQL
+    INSERT INTO user_actions (action_type, user_id, target_topic_id, target_post_id, acting_user_id, created_at, updated_at)
+    SELECT 2 /* was_liked */, p.user_id, p.topic_id, p.id, pa.user_id, pa.created_at, pa.updated_at
+    FROM post_actions pa
+         JOIN posts p ON pa.post_id = p.id
+    WHERE pa.post_action_type_id = 2 /* like */
+      AND pa.deleted_at IS NULL
+      AND p.deleted_at IS NULL
+    ON CONFLICT DO NOTHING
+  SQL
+
   log "Inserting user actions for NEW_TOPIC = 4..."
 
   DB.exec <<-SQL
@@ -164,6 +190,7 @@ def insert_user_options
                   include_tl0_in_digests,
                   automatically_unpin_topics,
                   enable_quoting,
+                  enable_smart_lists,
                   external_links_in_new_tab,
                   dynamic_favicon,
                   new_topic_duration_minutes,
@@ -172,6 +199,8 @@ def insert_user_options
                   like_notification_frequency,
                   skip_new_user_tips,
                   hide_profile_and_presence,
+                  hide_profile,
+                  hide_presence,
                   sidebar_link_to_filtered_list,
                   sidebar_show_count_of_new_items
                 )
@@ -187,6 +216,7 @@ def insert_user_options
                   , #{SiteSetting.default_include_tl0_in_digests}
                   , #{SiteSetting.default_topics_automatic_unpin}
                   , #{SiteSetting.default_other_enable_quoting}
+                  , #{SiteSetting.default_other_enable_smart_lists}
                   , #{SiteSetting.default_other_external_links_in_new_tab}
                   , #{SiteSetting.default_other_dynamic_favicon}
                   , #{SiteSetting.default_other_new_topic_duration_minutes}
@@ -194,7 +224,9 @@ def insert_user_options
                   , #{SiteSetting.default_other_notification_level_when_replying}
                   , #{SiteSetting.default_other_like_notification_frequency}
                   , #{SiteSetting.default_other_skip_new_user_tips}
-                  , #{SiteSetting.default_hide_profile_and_presence}
+                  , #{SiteSetting.default_hide_profile || SiteSetting.default_hide_presence}
+                  , #{SiteSetting.default_hide_profile}
+                  , #{SiteSetting.default_hide_presence}
                   , #{SiteSetting.default_sidebar_link_to_filtered_list}
                   , #{SiteSetting.default_sidebar_show_count_of_new_items}
                FROM users u
@@ -293,13 +325,11 @@ end
 def update_user_stats
   log "Updating user stats..."
 
-  # TODO: topic_count is counting all topics you replied in as if you started the topic.
-  # TODO: post_count is counting first posts.
   DB.exec <<-SQL
     WITH X AS (
       SELECT p.user_id
-           , COUNT(p.id) posts
-           , COUNT(DISTINCT p.topic_id) topics
+           , COUNT(CASE WHEN p.post_number > 1 THEN p.id END) AS posts
+           , COUNT(CASE WHEN p.post_number = 1 THEN t.id END) AS topics
            , MIN(p.created_at) min_created_at
            , COALESCE(COUNT(DISTINCT DATE(p.created_at)), 0) days
         FROM posts p
@@ -772,8 +802,15 @@ def import_rebake_posts(posts)
   max_count = posts.count
   current_count = 0
 
-  posts.find_each(order: :desc) do |post|
-    post.rebake!
+  ids = posts.pluck(:id)
+  # work randomly so you can run this job from lots of consoles if needed
+  ids.shuffle!
+
+  ids.each do |id|
+    # may have been cooked in interim
+    post = posts.where(id: id).first
+    post.rebake! if post
+
     current_count += 1
     print "\r%7d / %7d" % [current_count, max_count]
   end

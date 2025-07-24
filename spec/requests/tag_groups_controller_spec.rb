@@ -51,7 +51,18 @@ RSpec.describe TagGroupsController do
     describe "when limit params is invalid" do
       include_examples "invalid limit params",
                        "/tag_groups/filter/search.json",
-                       SiteSetting.max_tag_search_results
+                       described_class::MAX_TAG_GROUPS_SEARCH_RESULTS
+    end
+
+    it "doesn't error when the max_tag_search_results setting is lowered from its default" do
+      tag_group = tag_group_with_permission(everyone, readonly)
+
+      SiteSetting.max_tag_search_results = 4
+
+      get "/tag_groups/filter/search.json"
+      expect(response.status).to eq(200)
+      expect(response.parsed_body["results"].size).to eq(1)
+      expect(response.parsed_body["results"].first["name"]).to eq(tag_group.name)
     end
 
     context "for anons" do
@@ -145,6 +156,98 @@ RSpec.describe TagGroupsController do
         tag_group.permissions = [[auto_group, permission_type]]
         tag_group.save!
       end
+    end
+  end
+
+  describe "#create" do
+    fab!(:admin)
+
+    fab!(:tag1, :tag)
+    fab!(:tag2, :tag)
+
+    before { sign_in(admin) }
+
+    it "should create a tag group and log the creation" do
+      post "/tag_groups.json",
+           params: {
+             tag_group: {
+               name: "test_tag_group_log",
+               tag_names: [tag1.name, tag2.name],
+             },
+           }
+
+      expect(response.status).to eq(200)
+
+      expect(TagGroup.last.id).to eq(response.parsed_body["tag_group"]["id"])
+
+      expect(UserHistory.last).to have_attributes(
+        acting_user_id: admin.id,
+        action: UserHistory.actions[:tag_group_create],
+        subject: "test_tag_group_log",
+        new_value: response.parsed_body["tag_group"].to_json,
+      )
+    end
+  end
+
+  describe "#delete" do
+    fab!(:admin)
+
+    fab!(:tag1, :tag)
+    fab!(:tag2, :tag)
+    fab!(:tag_group) { Fabricate(:tag_group, tags: [tag1, tag2]) }
+
+    before { sign_in(admin) }
+
+    it "should delete the tag group and log the deletion" do
+      previous_value = TagGroupSerializer.new(tag_group).to_json(root: false)
+
+      delete "/tag_groups/#{tag_group.id}.json"
+
+      expect(response.status).to eq(200)
+
+      expect(TagGroup.find_by(id: tag_group.id)).to eq(nil)
+
+      expect(UserHistory.last).to have_attributes(
+        acting_user_id: admin.id,
+        action: UserHistory.actions[:tag_group_destroy],
+        subject: tag_group.name,
+        previous_value:,
+      )
+    end
+  end
+
+  describe "#update" do
+    fab!(:admin)
+
+    fab!(:tag1, :tag)
+    fab!(:tag2, :tag)
+    fab!(:tag3, :tag)
+    fab!(:tag_group) { Fabricate(:tag_group, tags: [tag1, tag2]) }
+
+    before { sign_in(admin) }
+
+    it "should update the tag group and log the modification" do
+      previous_value = TagGroupSerializer.new(tag_group).to_json(root: false)
+
+      put "/tag_groups/#{tag_group.id}.json",
+          params: {
+            tag_group: {
+              tag_group: {
+                name: "test_tag_group_new_name",
+                tag_names: [tag2.name, tag3.name],
+              },
+            },
+          }
+
+      expect(response.status).to eq(200)
+
+      expect(UserHistory.last).to have_attributes(
+        acting_user_id: admin.id,
+        action: UserHistory.actions[:tag_group_change],
+        subject: tag_group.name,
+        previous_value:,
+        new_value: response.parsed_body["tag_group"].to_json,
+      )
     end
   end
 end

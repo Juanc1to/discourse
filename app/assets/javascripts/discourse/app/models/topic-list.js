@@ -1,15 +1,16 @@
 import { tracked } from "@glimmer/tracking";
-import EmberObject from "@ember/object";
+import EmberObject, { action } from "@ember/object";
 import { notEmpty } from "@ember/object/computed";
-import { inject as service } from "@ember/service";
+import { service } from "@ember/service";
 import { isEmpty } from "@ember/utils";
 import { Promise } from "rsvp";
 import { ajax } from "discourse/lib/ajax";
+import deprecated from "discourse/lib/deprecated";
+import { getOwnerWithFallback } from "discourse/lib/get-owner";
 import RestModel from "discourse/models/rest";
 import Site from "discourse/models/site";
 import User from "discourse/models/user";
-import deprecated from "discourse-common/lib/deprecated";
-import { getOwnerWithFallback } from "discourse-common/lib/get-owner";
+import Topic from "./topic";
 
 function extractByKey(collection, klass) {
   const retval = {};
@@ -105,7 +106,7 @@ export default class TopicList extends RestModel {
     deprecated(
       `TopicList.find is deprecated. Use \`findFiltered("topicList")\` on the \`store\` service instead.`,
       {
-        id: "topic-list-find",
+        id: "discourse.topic-list-find",
         since: "3.1.0.beta5",
         dropFrom: "3.2.0.beta1",
       }
@@ -162,6 +163,7 @@ export default class TopicList extends RestModel {
     this.set("params", params);
   }
 
+  @action
   loadMore() {
     if (this.loadingMore) {
       return Promise.resolve();
@@ -184,12 +186,13 @@ export default class TopicList extends RestModel {
 
       this.set("loadingMore", true);
 
-      return ajax({ url: moreUrl }).then((result) => {
+      return ajax({ url: moreUrl }).then(async (result) => {
         let topicsAdded = 0;
 
         if (result) {
           // the new topics loaded from the server
           const newTopics = TopicList.topicsFrom(this.store, result);
+          await Topic.applyTransformations(newTopics);
 
           this.forEachNew(newTopics, (t) => {
             t.set("highlight", topicsAdded++ === 0);

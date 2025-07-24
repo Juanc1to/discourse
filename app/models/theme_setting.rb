@@ -11,7 +11,6 @@ class ThemeSetting < ActiveRecord::Base
   MAXIMUM_JSON_VALUE_SIZE_BYTES = 0.5 * 1024 * 1024 # 0.5 MB
 
   validates_presence_of :name, :theme
-  before_validation :objects_type_enabled
   validates :data_type, inclusion: { in: TYPES_ENUM.values }
   validate :json_value_size, if: -> { self.data_type == TYPES_ENUM[:objects] }
   validates :name, length: { maximum: 255 }
@@ -22,6 +21,13 @@ class ThemeSetting < ActiveRecord::Base
   after_save do
     if self.data_type == ThemeSetting.types[:upload] && saved_change_to_value?
       UploadReference.ensure_exist!(upload_ids: [self.value], target: self)
+    end
+
+    if theme.theme_modifier_set.refresh_theme_setting_modifiers(
+         target_setting_name: self.name,
+         target_setting_value: self.value,
+       )
+      theme.theme_modifier_set.save!
     end
   end
 
@@ -49,20 +55,13 @@ class ThemeSetting < ActiveRecord::Base
 
   private
 
-  def objects_type_enabled
-    if self.data_type == ThemeSetting.types[:objects] &&
-         !SiteSetting.experimental_objects_type_for_theme_settings
-      self.data_type = nil
-    end
-  end
-
   def json_value_size
     if json_value.to_json.size > MAXIMUM_JSON_VALUE_SIZE_BYTES
       errors.add(
         :json_value,
         I18n.t(
           "theme_settings.errors.json_value.too_large",
-          max_size_megabytes: MAXIMUM_JSON_VALUE_SIZE_BYTES / 1024 / 1024,
+          max_size: MAXIMUM_JSON_VALUE_SIZE_BYTES / 1024 / 1024,
         ),
       )
     end

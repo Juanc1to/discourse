@@ -1,4 +1,5 @@
 import { set } from "@ember/object";
+
 export default function (helpers) {
   const { response } = helpers;
 
@@ -60,7 +61,7 @@ export default function (helpers) {
         },
         {
           id: "reject_user",
-          icon: "user-times",
+          icon: "user-xmark",
           label: "Delete User...",
           action_ids: ["reject_user_delete", "reject_user_block"],
         },
@@ -78,7 +79,7 @@ export default function (helpers) {
         },
         {
           id: "reject_user_delete",
-          icon: "user-times",
+          icon: "user-xmark",
           button_class: null,
           label: "Delete User",
           description: "The user will be deleted from the forum.",

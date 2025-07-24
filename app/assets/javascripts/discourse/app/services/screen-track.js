@@ -1,14 +1,14 @@
 import { run } from "@ember/runloop";
-import Service, { inject as service } from "@ember/service";
+import Service, { service } from "@ember/service";
 import { ajax } from "discourse/lib/ajax";
+import { bind } from "discourse/lib/decorators";
+import { isTesting } from "discourse/lib/environment";
 import { disableImplicitInjections } from "discourse/lib/implicit-injections";
 import {
   getHighestReadCache,
   resetHighestReadCache,
   setHighestReadCache,
 } from "discourse/lib/topic-list-tracker";
-import { isTesting } from "discourse-common/config/environment";
-import { bind } from "discourse-common/utils/decorators";
 
 // We use this class to track how long posts in a topic are on the screen.
 const PAUSE_UNLESS_SCROLLED = 1000 * 60 * 3;
@@ -338,7 +338,7 @@ export default class ScreenTrack extends Service {
     this._lastFlush += diff;
     this._lastTick = now;
 
-    const nextFlush = this.siteSettings.flush_timings_secs * 1000;
+    const nextFlush = 60 * 1000;
 
     const rush = [...this._timings.entries()].some(([postNumber, timing]) => {
       return (

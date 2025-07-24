@@ -17,6 +17,8 @@ RSpec.describe Plugin::Instance do
 some_ruby
 TEXT
 
+  around { |example| allow_missing_translations(&example) }
+
   after { DiscoursePluginRegistry.reset! }
 
   # NOTE: sample_plugin_site_settings.yml is always loaded in tests in site_setting.rb
@@ -31,7 +33,7 @@ TEXT
     end
 
     it "defaults to using the plugin name with the discourse- prefix removed" do
-      expect(plugin_instance.humanized_name).to eq("sample-plugin")
+      expect(plugin_instance.humanized_name).to eq("Sample plugin")
     end
 
     it "uses the plugin setting category name if it exists" do
@@ -40,8 +42,8 @@ TEXT
     end
 
     it "the plugin name the plugin site settings are still under the generic plugins: category" do
-      plugin_instance.stubs(:setting_catgory).returns("plugins")
-      expect(plugin_instance.humanized_name).to eq("sample-plugin")
+      plugin_instance.stubs(:setting_category).returns("plugins")
+      expect(plugin_instance.humanized_name).to eq("Sample plugin")
     end
 
     it "removes any Discourse prefix from the setting category name" do
@@ -103,6 +105,9 @@ TEXT
         :likes_7_days,
         :likes_30_days,
         :likes_count,
+        :participating_users_last_day,
+        :participating_users_7_days,
+        :participating_users_30_days,
       )
     end
 
@@ -181,6 +186,7 @@ TEXT
 
       class TroutPlugin < Plugin::Instance
         attr_accessor :enabled
+
         def enabled?
           @enabled
         end
@@ -276,6 +282,42 @@ TEXT
         @plugin.enabled = true
         expect(DiscoursePluginRegistry.build_html("test:html", ctx)).to eq("<div>hello</div>")
       end
+
+      it "can act when the plugin is enabled/disabled" do
+        plugin = Plugin::Instance.new
+        plugin.enabled_site_setting(:discourse_sample_plugin_enabled)
+
+        SiteSetting.discourse_sample_plugin_enabled = false
+        expect(plugin.enabled?).to eq(false)
+
+        begin
+          expected_old_value = expected_new_value = nil
+
+          event_handler =
+            plugin.on_enabled_change do |old_value, new_value|
+              expected_old_value = old_value
+              expected_new_value = new_value
+            end
+
+          SiteSetting.discourse_sample_plugin_enabled = true
+          expect(expected_old_value).to eq(false)
+          expect(expected_new_value).to eq(true)
+
+          SiteSetting.discourse_sample_plugin_enabled = false
+          expect(expected_old_value).to eq(true)
+          expect(expected_new_value).to eq(false)
+
+          # ensures only the setting specified in `enabled_site_setting` is tracked
+          expected_old_value = expected_new_value = nil
+          plugin.enabled_site_setting(:discourse_sample_plugin_enabled_alternative)
+          SiteSetting.discourse_sample_plugin_enabled = true
+          expect(expected_old_value).to be_nil
+          expect(expected_new_value).to be_nil
+        ensure
+          # clear the underlying DiscourseEvent
+          DiscourseEvent.off(:site_setting_changed, &event_handler)
+        end
+      end
     end
   end
 
@@ -298,7 +340,7 @@ TEXT
       plugin.send :register_assets!
 
       expect(DiscoursePluginRegistry.vendored_core_pretty_text.first).to eq(
-        "vendor/assets/javascripts/moment.js",
+        "app/assets/javascripts/discourse/node_modules/moment/moment.js",
       )
     end
   end
@@ -316,55 +358,14 @@ TEXT
   end
 
   describe "#add_report" do
+    after { Report.remove_report("readers") }
+
     it "adds a report" do
       plugin = Plugin::Instance.new nil, "/tmp/test.rb"
       plugin.add_report("readers") {}
 
       expect(Report.respond_to?(:report_readers)).to eq(true)
     end
-  end
-
-  it "patches the enabled? function for auth_providers if not defined" do
-    SimpleAuthenticator =
-      Class.new(Auth::Authenticator) do
-        def name
-          "my_authenticator"
-        end
-      end
-
-    plugin = Plugin::Instance.new
-
-    # lets piggy back on another boolean setting, so we don't dirty our SiteSetting object
-    SiteSetting.enable_badges = false
-
-    # No enabled_site_setting
-    authenticator = SimpleAuthenticator.new
-    plugin.auth_provider(authenticator: authenticator)
-    plugin.notify_after_initialize
-    expect(authenticator.enabled?).to eq(true)
-
-    # With enabled site setting
-    plugin = Plugin::Instance.new
-    authenticator = SimpleAuthenticator.new
-    plugin.auth_provider(enabled_setting: "enable_badges", authenticator: authenticator)
-    plugin.notify_after_initialize
-    expect(authenticator.enabled?).to eq(false)
-
-    # Defines own method
-    plugin = Plugin::Instance.new
-
-    SiteSetting.enable_badges = true
-    authenticator =
-      Class
-        .new(SimpleAuthenticator) do
-          def enabled?
-            false
-          end
-        end
-        .new
-    plugin.auth_provider(enabled_setting: "enable_badges", authenticator: authenticator)
-    plugin.notify_after_initialize
-    expect(authenticator.enabled?).to eq(false)
   end
 
   describe "#activate!" do
@@ -442,26 +443,6 @@ TEXT
 
       payload = JSON.parse(UserSerializer.new(user, scope: Guardian.new(user)).to_json)
       expect(payload["user"]["custom_fields"]).to eq({})
-    end
-  end
-
-  describe "#register_color_scheme" do
-    it "can add a color scheme for the first time" do
-      plugin = Plugin::Instance.new nil, "/tmp/test.rb"
-      expect {
-        plugin.register_color_scheme("Purple", primary: "EEE0E5")
-        plugin.notify_after_initialize
-      }.to change { ColorScheme.count }.by(1)
-      expect(ColorScheme.where(name: "Purple")).to be_present
-    end
-
-    it "doesn't add the same color scheme twice" do
-      Fabricate(:color_scheme, name: "Halloween")
-      plugin = Plugin::Instance.new nil, "/tmp/test.rb"
-      expect {
-        plugin.register_color_scheme("Halloween", primary: "EEE0E5")
-        plugin.notify_after_initialize
-      }.to_not change { ColorScheme.count }
     end
   end
 
@@ -564,9 +545,6 @@ TEXT
       expect(DiscoursePluginRegistry.locales).to have_key(:foo_BAR)
 
       expect(locale[:fallbackLocale]).to be_nil
-      expect(locale[:message_format]).to eq(
-        ["foo_BAR", "#{plugin_path}/lib/javascripts/locale/message_format/foo_BAR.js"],
-      )
       expect(locale[:moment_js]).to eq(
         ["foo_BAR", "#{plugin_path}/lib/javascripts/locale/moment_js/foo_BAR.js"],
       )
@@ -575,11 +553,6 @@ TEXT
       )
       expect(locale[:plural]).to eq(plural.with_indifferent_access)
 
-      expect(Rails.configuration.assets.precompile).to include("locales/foo_BAR.js")
-
-      expect(
-        JsLocaleHelper.find_message_format_locale(["foo_BAR"], fallback_to_english: true),
-      ).to eq(locale[:message_format])
       expect(JsLocaleHelper.find_moment_locale(["foo_BAR"])).to eq(locale[:moment_js])
       expect(JsLocaleHelper.find_moment_locale(["foo_BAR"], timezone_names: true)).to eq(
         locale[:moment_js_timezones],
@@ -593,22 +566,20 @@ TEXT
       expect(DiscoursePluginRegistry.locales).to have_key(:tup)
 
       expect(locale[:fallbackLocale]).to eq("pt_BR")
-      expect(locale[:message_format]).to eq(
-        ["pt_BR", "#{Rails.root}/lib/javascripts/locale/pt_BR.js"],
-      )
       expect(locale[:moment_js]).to eq(
-        ["pt-br", "#{Rails.root}/vendor/assets/javascripts/moment-locale/pt-br.js"],
+        [
+          "pt-br",
+          "#{Rails.root}/app/assets/javascripts/discourse/node_modules/moment/locale/pt-br.js",
+        ],
       )
       expect(locale[:moment_js_timezones]).to eq(
-        ["pt", "#{Rails.root}/vendor/assets/javascripts/moment-timezone-names-locale/pt.js"],
+        [
+          "pt",
+          "#{Rails.root}/node_modules/@discourse/moment-timezone-names-translations/locales/pt.js",
+        ],
       )
       expect(locale[:plural]).to be_nil
 
-      expect(Rails.configuration.assets.precompile).to include("locales/tup.js")
-
-      expect(JsLocaleHelper.find_message_format_locale(["tup"], fallback_to_english: true)).to eq(
-        locale[:message_format],
-      )
       expect(JsLocaleHelper.find_moment_locale(["tup"])).to eq(locale[:moment_js])
     end
 
@@ -619,19 +590,11 @@ TEXT
       expect(DiscoursePluginRegistry.locales).to have_key(:tlh)
 
       expect(locale[:fallbackLocale]).to be_nil
-      expect(locale[:message_format]).to eq(
-        ["tlh", "#{plugin_path}/lib/javascripts/locale/message_format/tlh.js"],
-      )
       expect(locale[:moment_js]).to eq(
-        ["tlh", "#{Rails.root}/vendor/assets/javascripts/moment-locale/tlh.js"],
+        ["tlh", "#{Rails.root}/app/assets/javascripts/discourse/node_modules/moment/locale/tlh.js"],
       )
       expect(locale[:plural]).to eq(plural.with_indifferent_access)
 
-      expect(Rails.configuration.assets.precompile).to include("locales/tlh.js")
-
-      expect(JsLocaleHelper.find_message_format_locale(["tlh"], fallback_to_english: true)).to eq(
-        locale[:message_format],
-      )
       expect(JsLocaleHelper.find_moment_locale(["tlh"])).to eq(locale[:moment_js])
     end
 
@@ -643,9 +606,7 @@ TEXT
     %w[
       config/locales/client.foo_BAR.yml
       config/locales/server.foo_BAR.yml
-      lib/javascripts/locale/message_format/foo_BAR.js
       lib/javascripts/locale/moment_js/foo_BAR.js
-      assets/locales/foo_BAR.js.erb
     ].each do |path|
       it "does not register a new locale when #{path} is missing" do
         path = "#{plugin_path}/#{path}"
@@ -659,25 +620,88 @@ TEXT
     end
   end
 
-  describe "#register_reviewable_types" do
-    it "Overrides the existing Reviewable types adding new ones" do
-      current_types = Reviewable.types
-      new_type_class = Class
+  describe "#register_reviewable_type" do
+    subject(:register_reviewable_type) { plugin_instance.register_reviewable_type(new_type) }
 
-      Plugin::Instance.new.register_reviewable_type new_type_class
+    context "when the provided class inherits from `Reviewable`" do
+      let(:new_type) do
+        class MyReviewable < Reviewable
+        end
+        MyReviewable
+      end
 
-      expect(Reviewable.types).to match_array(current_types << new_type_class.name)
+      let(:new_scrubbable_type) do
+        class MyScrubbableReviewable < Reviewable
+          def scrub(reason, guardian)
+            # scrub logic
+          end
+        end
+        MyScrubbableReviewable
+      end
+
+      it "adds the provided class to the existing types" do
+        expect { register_reviewable_type }.to change { Reviewable.types.size }.by(1)
+        expect(Reviewable.types).to include(new_type)
+      end
+
+      it "shows the correct source for the new type" do
+        register_reviewable_type
+        expect(Reviewable.source_for(new_type)).to eq("discourse-sample-plugin")
+      end
+
+      it "isn't listed as a scrubbable type if it doesn't have a scrub method" do
+        register_reviewable_type
+        expect(Reviewable.scrubbable_types).not_to include(new_type)
+      end
+
+      it "is listed as a scrubbable type if it has a scrub method" do
+        plugin_instance.register_reviewable_type(new_scrubbable_type)
+        expect(Reviewable.scrubbable_types).to include(new_scrubbable_type)
+      end
+
+      context "when the plugin is disabled" do
+        before do
+          register_reviewable_type
+          plugin_instance.stubs(:enabled?).returns(false)
+        end
+
+        it "does not return the new type" do
+          expect(Reviewable.types).not_to be_blank
+          expect(Reviewable.types).not_to include(new_type)
+        end
+      end
+    end
+
+    context "when the provided class does not inherit from `Reviewable`" do
+      let(:new_type) { Class }
+
+      it "does not add the provided class to the existing types" do
+        expect { register_reviewable_type }.not_to change { Reviewable.types }
+        expect(Reviewable.types).not_to be_blank
+      end
     end
   end
 
   describe "#extend_list_method" do
-    it "Overrides the existing list appending new elements" do
-      current_list = Reviewable.types
-      new_element = Class.name
+    subject(:extend_list) do
+      plugin_instance.extend_list_method(UserHistory, :staff_actions, %i[new_action another_action])
+    end
 
-      Plugin::Instance.new.extend_list_method Reviewable, :types, [new_element]
+    it "adds the provided values to the provided method on the provided class" do
+      expect { extend_list }.to change { UserHistory.staff_actions.size }.by(2)
+      expect(UserHistory.staff_actions).to include(:new_action, :another_action)
+    end
 
-      expect(Reviewable.types).to match_array(current_list << new_element)
+    context "when the plugin is disabled" do
+      before do
+        extend_list
+        plugin_instance.stubs(:enabled?).returns(false)
+      end
+
+      it "does not return the provided values" do
+        expect(UserHistory.staff_actions).not_to be_blank
+        expect(UserHistory.staff_actions).not_to include(:new_action, :another_action)
+      end
     end
   end
 
@@ -709,16 +733,20 @@ TEXT
     it "sanitizes emojis' names" do
       Plugin::Instance.new.register_emoji("?", "/baz/bar.png", "baz")
       Plugin::Instance.new.register_emoji("?test?!!", "/foo/bar.png", "baz")
+      Plugin::Instance.new.register_emoji("+1", "/foo/bar.png", "baz")
+      Plugin::Instance.new.register_emoji("test!-1", "/foo/bar.png", "baz")
 
       expect(Emoji.custom.first.name).to eq("_")
       expect(Emoji.custom.second.name).to eq("_test_")
+      expect(Emoji.custom.third.name).to eq("+1")
+      expect(Emoji.custom.fourth.name).to eq("test_-1")
     end
   end
 
   describe "#replace_flags" do
     after do
       PostActionType.replace_flag_settings(nil)
-      ReviewableScore.reload_types
+      Flag.reset_flag_settings!
     end
 
     let(:original_flags) { PostActionType.flag_settings }
@@ -931,7 +959,7 @@ TEXT
 
     it "registers an about stat group correctly" do
       stats = { :last_day => 1, "7_days" => 10, "30_days" => 100, :count => 1000 }
-      plugin.register_stat("some_group", show_in_ui: true) { stats }
+      plugin.register_stat("some_group") { stats }
       expect(Stat.all_stats.with_indifferent_access).to match(
         hash_including(
           some_group_last_day: 1,
@@ -940,12 +968,6 @@ TEXT
           some_group_count: 1000,
         ),
       )
-    end
-
-    it "hides the stat group from the UI by default" do
-      stats = { :last_day => 1, "7_days" => 10, "30_days" => 100, :count => 1000 }
-      plugin.register_stat("some_group") { stats }
-      expect(About.displayed_plugin_stat_groups).to eq([])
     end
 
     it "does not allow duplicate named stat groups" do
@@ -996,6 +1018,192 @@ TEXT
 
       sum = DiscoursePluginRegistry.apply_modifier(:magic_sum_modifier, 1, 2)
       expect(sum).to eq(3)
+    end
+  end
+
+  describe "#add_request_rate_limiter" do
+    after { Middleware::RequestTracker.reset_rate_limiters_stack }
+
+    it "should raise an error if `after` and `before` kwarg are provided" do
+      plugin = Plugin::Instance.new
+
+      expect do
+        plugin.add_request_rate_limiter(
+          identifier: :some_identifier,
+          key: ->(request) { request.ip },
+          activate_when: ->(request) { request.ip == "1.2.3.4" },
+          after: 0,
+          before: 0,
+        )
+      end.to raise_error(ArgumentError, "only one of `after` or `before` can be provided")
+    end
+
+    it "should raise an error if value of `after` kwarg is invalid" do
+      plugin = Plugin::Instance.new
+
+      expect {
+        plugin.add_request_rate_limiter(
+          identifier: :some_identifier,
+          key: ->(request) { request.ip },
+          activate_when: ->(request) { request.ip == "1.2.3.4" },
+          after: 0,
+        )
+      }.to raise_error(
+        ArgumentError,
+        "0 is not a valid value. Must be one of RequestTracker::RateLimiters::User, RequestTracker::RateLimiters::IP",
+      )
+    end
+
+    it "should raise an error if value of `before` kwarg is invalid" do
+      plugin = Plugin::Instance.new
+
+      expect {
+        plugin.add_request_rate_limiter(
+          identifier: :some_identifier,
+          key: ->(request) { request.ip },
+          activate_when: ->(request) { request.ip == "1.2.3.4" },
+          before: 0,
+        )
+      }.to raise_error(
+        ArgumentError,
+        "0 is not a valid value. Must be one of RequestTracker::RateLimiters::User, RequestTracker::RateLimiters::IP",
+      )
+    end
+
+    it "can prepend a rate limiter to `Middleware::RequestTracker.rate_limiters_stack`" do
+      plugin = Plugin::Instance.new
+
+      plugin.add_request_rate_limiter(
+        identifier: :some_identifier,
+        key: ->(request) { "crawlers" },
+        activate_when: ->(request) { request.user_agent =~ /crawler/ },
+      )
+
+      rate_limiter = Middleware::RequestTracker.rate_limiters_stack[0]
+
+      expect(rate_limiter.superclass).to eq(RequestTracker::RateLimiters::Base)
+    end
+
+    it "can insert a rate limiter before a specific rate limiter in `Middleware::RequestTracker.rate_limiters_stack`" do
+      plugin = Plugin::Instance.new
+
+      plugin.add_request_rate_limiter(
+        identifier: :some_identifier,
+        key: ->(request) { "crawlers" },
+        activate_when: ->(request) { request.user_agent =~ /crawler/ },
+        before: RequestTracker::RateLimiters::IP,
+      )
+
+      expect(Middleware::RequestTracker.rate_limiters_stack[0]).to eq(
+        RequestTracker::RateLimiters::User,
+      )
+
+      expect(Middleware::RequestTracker.rate_limiters_stack[1].superclass).to eq(
+        RequestTracker::RateLimiters::Base,
+      )
+
+      expect(Middleware::RequestTracker.rate_limiters_stack[2]).to eq(
+        RequestTracker::RateLimiters::IP,
+      )
+    end
+
+    it "can insert a rate limiter after a specific rate limiter in `Middleware::RequestTracker.rate_limiters_stack`" do
+      plugin = Plugin::Instance.new
+
+      plugin.add_request_rate_limiter(
+        identifier: :some_identifier,
+        key: ->(request) { "crawlers" },
+        activate_when: ->(request) { request.user_agent =~ /crawler/ },
+        after: RequestTracker::RateLimiters::IP,
+      )
+
+      expect(Middleware::RequestTracker.rate_limiters_stack[0]).to eq(
+        RequestTracker::RateLimiters::User,
+      )
+
+      expect(Middleware::RequestTracker.rate_limiters_stack[1]).to eq(
+        RequestTracker::RateLimiters::IP,
+      )
+
+      expect(Middleware::RequestTracker.rate_limiters_stack[2].superclass).to eq(
+        RequestTracker::RateLimiters::Base,
+      )
+    end
+  end
+
+  describe "#full_admin_route" do
+    context "when there is no admin route defined for the plugin" do
+      context "if the plugin has more than one setting" do
+        before do
+          plugin_instance.stubs(:plugin_settings).returns(
+            { enabled_setting: plugin_instance.name, other_setting: plugin_instance.name },
+          )
+        end
+
+        it "returns the default settings route" do
+          expect(plugin_instance.full_admin_route).to eq(
+            {
+              auto_generated: true,
+              full_location: "adminPlugins.show",
+              label: "discourse_sample_plugin.title",
+              location: "discourse-sample-plugin",
+              use_new_show_route: true,
+            },
+          )
+        end
+      end
+
+      context "if the plugin has only one setting (which is the enabled setting)" do
+        before do
+          plugin_instance.stubs(:plugin_settings).returns({ enabled_setting: plugin_instance.name })
+        end
+
+        it "returns nothing" do
+          expect(plugin_instance.full_admin_route).to be_nil
+        end
+      end
+
+      context "if the plugin is not configurable" do
+        before { plugin_instance.stubs(:configurable?).returns(false) }
+
+        it "returns nothing" do
+          expect(plugin_instance.full_admin_route).to be_nil
+        end
+      end
+    end
+
+    context "when there is an admin route defined for the plugin" do
+      context "when using the new show route" do
+        before { plugin_instance.add_admin_route("test", "testIndex", use_new_show_route: true) }
+
+        it "returns the correct details" do
+          expect(plugin_instance.full_admin_route).to eq(
+            {
+              auto_generated: false,
+              full_location: "adminPlugins.show",
+              label: "test",
+              location: "testIndex",
+              use_new_show_route: true,
+            },
+          )
+        end
+      end
+
+      context "when not using the new show route" do
+        before { plugin_instance.add_admin_route("test", "testIndex") }
+
+        it "returns the correct details" do
+          expect(plugin_instance.full_admin_route).to eq(
+            {
+              auto_generated: false,
+              full_location: "adminPlugins.testIndex",
+              label: "test",
+              location: "testIndex",
+              use_new_show_route: false,
+            },
+          )
+        end
+      end
     end
   end
 end

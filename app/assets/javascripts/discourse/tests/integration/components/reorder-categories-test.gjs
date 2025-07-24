@@ -1,4 +1,4 @@
-import { getOwner } from "@ember/application";
+import { getOwner } from "@ember/owner";
 import { click, fillIn, render } from "@ember/test-helpers";
 import { module, test } from "qunit";
 import ReorderCategories from "discourse/components/modal/reorder-categories";
@@ -136,13 +136,11 @@ module("Integration | Component | ReorderCategories", function (hooks) {
       position: 1,
       name: "foo-child",
       parent_category_id: 101,
-      subcategories: [fooChildChild],
     });
     const foo = store.createRecord("category", {
       id: 101,
       position: 0,
       name: "foo",
-      subcategories: [fooChild],
     });
     const bar = store.createRecord("category", {
       id: 102,

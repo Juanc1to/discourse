@@ -23,10 +23,11 @@ class S3Helper
   # Controls the following:
   #
   # * presigned put_object URLs for direct S3 uploads
-  UPLOAD_URL_EXPIRES_AFTER_SECONDS ||= 10.minutes.to_i
+  UPLOAD_URL_EXPIRES_AFTER_SECONDS = 10.minutes.to_i
 
   def initialize(s3_bucket_name, tombstone_prefix = "", options = {})
     @s3_client = options.delete(:client)
+    @s3_bucket = options.delete(:bucket)
     @s3_options = default_s3_options.merge(options)
 
     @s3_bucket_name, @s3_bucket_folder_path =
@@ -49,6 +50,7 @@ class S3Helper
     options[:client] = s3_client if s3_client.present?
     options[:use_accelerate_endpoint] = !for_backup &&
       SiteSetting.Upload.enable_s3_transfer_acceleration
+    options[:use_dualstack_endpoint] = SiteSetting.Upload.use_dualstack_endpoint
 
     bucket =
       if for_backup
@@ -242,15 +244,22 @@ class S3Helper
     s3_bucket.objects(options)
   end
 
-  def tag_file(key, tags)
-    tag_array = []
-    tags.each { |k, v| tag_array << { key: k.to_s, value: v.to_s } }
+  def upsert_tag(key, tag_key:, tag_value:)
+    key = get_path_for_s3_upload(key)
+    tags = s3_resource.client.get_object_tagging(bucket: @s3_bucket_name, key:).tag_set
+    tag_index = tags.find_index { |tag| tag[:key].to_s == tag_key.to_s }
+
+    if tag_index
+      tags[tag_index][:value] = tag_value.to_s
+    else
+      tags << { key: tag_key.to_s, value: tag_value.to_s }
+    end
 
     s3_resource.client.put_object_tagging(
       bucket: @s3_bucket_name,
       key: key,
       tagging: {
-        tag_set: tag_array,
+        tag_set: tags,
       },
     )
   end
@@ -264,6 +273,7 @@ class S3Helper
 
     opts[:endpoint] = SiteSetting.s3_endpoint if SiteSetting.s3_endpoint.present?
     opts[:http_continue_timeout] = SiteSetting.s3_http_continue_timeout
+    opts[:use_dualstack_endpoint] = SiteSetting.Upload.use_dualstack_endpoint
 
     unless obj.s3_use_iam_profile
       opts[:access_key_id] = obj.s3_access_key_id
@@ -281,7 +291,12 @@ class S3Helper
   end
 
   def s3_client
-    @s3_client ||= Aws::S3::Client.new(@s3_options)
+    @s3_client ||= init_aws_s3_client
+  end
+
+  def stub_client_responses!
+    raise "This method is only allowed to be used in the testing environment" if !Rails.env.test?
+    @s3_client = init_aws_s3_client(stub_responses: true)
   end
 
   def s3_inventory_path(path = "inventory")
@@ -292,15 +307,17 @@ class S3Helper
     s3_client.abort_multipart_upload(bucket: s3_bucket_name, key: key, upload_id: upload_id)
   end
 
-  def create_multipart(key, content_type, metadata: {})
+  def create_multipart(key, content_type, metadata: {}, acl: nil, tagging: nil)
     response =
       s3_client.create_multipart_upload(
-        acl: SiteSetting.s3_use_acls ? "private" : nil,
+        acl:,
+        tagging:,
         bucket: s3_bucket_name,
         key: key,
         content_type: content_type,
         metadata: metadata,
       )
+
     { upload_id: response.upload_id, key: key }
   end
 
@@ -356,6 +373,7 @@ class S3Helper
         key: key,
         expires_in: expires_in,
         use_accelerate_endpoint: @s3_options[:use_accelerate_endpoint],
+        use_dualstack_endpoint: @s3_options[:use_dualstack_endpoint],
       }.merge(opts),
     )
   end
@@ -374,11 +392,18 @@ class S3Helper
         key: key,
         expires_in: expires_in,
         use_accelerate_endpoint: @s3_options[:use_accelerate_endpoint],
+        use_dualstack_endpoint: @s3_options[:use_dualstack_endpoint],
       }.merge(opts),
     )
   end
 
   private
+
+  def init_aws_s3_client(stub_responses: false)
+    options = @s3_options
+    options = options.merge(stub_responses: true) if stub_responses
+    Aws::S3::Client.new(options)
+  end
 
   def fetch_bucket_cors_rules
     begin

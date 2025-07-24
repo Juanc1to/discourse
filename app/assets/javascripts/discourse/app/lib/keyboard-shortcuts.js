@@ -1,6 +1,9 @@
-import { getOwner, setOwner } from "@ember/application";
+import { getOwner, setOwner } from "@ember/owner";
 import { run, throttle } from "@ember/runloop";
 import { ajax } from "discourse/lib/ajax";
+import domUtils from "discourse/lib/dom-utils";
+import { INPUT_DELAY } from "discourse/lib/environment";
+import discourseLater from "discourse/lib/later";
 import { headerOffset } from "discourse/lib/offset-calculator";
 import {
   nextTopicUrl,
@@ -9,11 +12,19 @@ import {
 import DiscourseURL from "discourse/lib/url";
 import Composer from "discourse/models/composer";
 import { capabilities } from "discourse/services/capabilities";
-import { INPUT_DELAY } from "discourse-common/config/environment";
-import discourseLater from "discourse-common/lib/later";
-import domUtils from "discourse-common/utils/dom-utils";
+
+let disabledBindings = [];
+
+export function disableDefaultKeyboardShortcuts(bindings) {
+  disabledBindings = disabledBindings.concat(bindings);
+}
+
+export function clearDisabledDefaultKeyboardBindings() {
+  disabledBindings = [];
+}
 
 let extraKeyboardShortcutsHelp = {};
+
 function addExtraKeyboardShortcutHelp(help) {
   const category = help.category;
   if (extraKeyboardShortcutsHelp[category]) {
@@ -49,8 +60,6 @@ const DEFAULT_BINDINGS = {
   b: { handler: "toggleBookmark" },
   c: { handler: "createTopic" },
   "shift+c": { handler: "focusComposer" },
-  "ctrl+f": { handler: "showPageSearch", anonymous: true },
-  "command+f": { handler: "showPageSearch", anonymous: true },
   "command+left": { handler: "webviewKeyboardBack", anonymous: true },
   "command+[": { handler: "webviewKeyboardBack", anonymous: true },
   "command+right": { handler: "webviewKeyboardForward", anonymous: true },
@@ -114,12 +123,14 @@ const DEFAULT_BINDINGS = {
   "shift+f11": { handler: "fullscreenComposer", global: true },
   "shift+u": { handler: "deferTopic" },
   "shift+a": { handler: "toggleAdminActions" },
+  "shift+b": { handler: "toggleBulkSelect" },
   t: { postAction: "replyAsNewTopic" },
   u: { handler: "goBack", anonymous: true },
-  "x r": {
-    click: "#dismiss-new-bottom,#dismiss-new-top",
-  }, // dismiss new
-  "x t": { click: "#dismiss-topics-bottom,#dismiss-topics-top" }, // dismiss topics
+  x: { handler: "bulkSelectItem" },
+  "shift+d": {
+    click:
+      "#dismiss-new-bottom, #dismiss-new-top, #dismiss-topics-bottom, #dismiss-topics-top",
+  }, // dismiss new or unread
 };
 
 const animationDuration = 100;
@@ -152,6 +163,10 @@ export default {
     // Disable the shortcut if private messages are disabled
     if (!this.currentUser?.can_send_private_messages) {
       delete DEFAULT_BINDINGS["g m"];
+    }
+
+    if (disabledBindings.length) {
+      disabledBindings.forEach((binding) => delete DEFAULT_BINDINGS[binding]);
     }
   },
 
@@ -258,18 +273,22 @@ export default {
   addShortcut(shortcut, callback, opts = {}) {
     // we trim but leave whitespace between characters, as shortcuts
     // like `z z` are valid for ItsATrap
-    shortcut = shortcut.trim();
-    let newBinding = Object.assign({ handler: callback }, opts);
-    this.bindKey(shortcut, newBinding);
+    this.bindKey(shortcut.trim(), { handler: callback, ...opts });
     if (opts.help) {
       addExtraKeyboardShortcutHelp(opts.help);
     }
   },
 
-  // unbinds all the shortcuts in a key binding object e.g.
-  // {
-  //   'c': createTopic
-  // }
+  /**
+   * unbind(combinations)
+   *
+   * Unbinds all the shortcuts in a key binding object.
+   *
+   *  - combinations:
+   *  {
+   *   'c': createTopic
+   * }
+   */
   unbind(combinations) {
     Object.keys(combinations).forEach((combo) => this.keyTrapper.unbind(combo));
   },
@@ -410,6 +429,13 @@ export default {
     this._moveSelection({ direction: -1, scrollWithinPosts: true });
   },
 
+  bulkSelectItem() {
+    const elem = document.querySelector(
+      ".selected input.bulk-select, .selected .select-post"
+    );
+    elem?.click();
+  },
+
   goBack() {
     history.back();
   },
@@ -420,15 +446,6 @@ export default {
 
   prevSection() {
     this._changeSection(-1);
-  },
-
-  showPageSearch(event) {
-    run(() => {
-      this.appEvents.trigger("header:keyboard-trigger", {
-        type: "page-search",
-        event,
-      });
-    });
   },
 
   printTopic(event) {
@@ -589,6 +606,7 @@ export default {
 
         const result = actionMethod.call(topicController, post);
         if (result && result.then) {
+          // TODO (glimmer-post-stream) the Glimmer Post Stream does not listen to this event
           this.appEvents.trigger("post-stream:refresh", { id: selectedPostId });
         }
       }
@@ -659,7 +677,7 @@ export default {
     );
     if (!selected) {
       selected = articles.find(
-        (element) => element.dataset.islastviewedtopic === "true"
+        (element) => element.dataset.isLastViewedTopic === "true"
       );
     }
 
@@ -744,7 +762,17 @@ export default {
       if (article.getBoundingClientRect().height > 0) {
         break;
       }
+
+      // Safeguard against infinite loops
+      if (direction === 0) {
+        break;
+      }
     }
+
+    this.appEvents.trigger("keyboard:move-selection", {
+      articles,
+      selectedArticle: article,
+    });
 
     for (const a of articles) {
       a.classList.remove("selected");
@@ -753,11 +781,6 @@ export default {
     article.classList.add("selected");
     article.setAttribute("tabindex", "0");
     article.focus();
-
-    this.appEvents.trigger("keyboard:move-selection", {
-      articles,
-      selectedArticle: article,
-    });
 
     const articleTop = domUtils.offset(article).top,
       articleTopPosition = articleTop - headerOffset();
@@ -820,7 +843,7 @@ export default {
     let categoriesTopicsList;
     if (document.querySelector(".posts-wrapper")) {
       return document.querySelectorAll(
-        ".posts-wrapper .topic-post, .topic-list tbody tr"
+        ".posts-wrapper .topic-post, .posts-wrapper .post-stream--cloaked, .topic-list tbody tr"
       );
     } else if (document.querySelector(".topic-list")) {
       return document.querySelectorAll(".topic-list .topic-list-item");
@@ -884,7 +907,17 @@ export default {
   },
 
   toggleAdminActions() {
-    this.appEvents.trigger("topic:toggle-actions");
+    document.querySelector(".toggle-admin-menu")?.click();
+  },
+
+  toggleBulkSelect() {
+    const bulkSelect = document.querySelector("button.bulk-select");
+
+    if (bulkSelect) {
+      bulkSelect.click();
+    } else {
+      getOwner(this).lookup("controller:topic").send("toggleMultiSelect");
+    }
   },
 
   toggleArchivePM() {

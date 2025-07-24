@@ -1,18 +1,16 @@
 import Mobile from "discourse/lib/mobile";
-import { setResolverOption } from "discourse-common/resolver";
+import { setResolverOption } from "discourse/resolver";
 
 // Initializes the `Mobile` helper object.
 export default {
   after: "inject-objects",
 
   initialize(owner) {
+    if (owner.lookup("service:site-settings").viewport_based_mobile_mode) {
+      return;
+    }
+
     Mobile.init();
-    const site = owner.lookup("service:site");
-
-    site.set("mobileView", Mobile.mobileView);
-    site.set("desktopView", !Mobile.mobileView);
-    site.set("isMobileDevice", Mobile.isMobileDevice);
-
     setResolverOption("mobileView", Mobile.mobileView);
   },
 };

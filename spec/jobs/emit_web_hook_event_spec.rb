@@ -5,8 +5,8 @@ require "excon"
 RSpec.describe Jobs::EmitWebHookEvent do
   subject(:job) { described_class.new }
 
-  fab!(:post_hook) { Fabricate(:web_hook) }
-  fab!(:inactive_hook) { Fabricate(:inactive_web_hook) }
+  fab!(:post_hook, :web_hook)
+  fab!(:inactive_hook, :inactive_web_hook)
   fab!(:post)
   fab!(:user)
 
@@ -344,6 +344,38 @@ RSpec.describe Jobs::EmitWebHookEvent do
         "sha256=162f107f6b5022353274eb1a7197885cfd35744d8d08e5bcea025d309386b7d6",
       )
       expect(event.payload).to eq(MultiJson.dump(ping: "OK"))
+    end
+
+    context "with `webhook_event_headers` modifier" do
+      let(:modifier_block) do
+        Proc.new do |headers, _, _|
+          headers["D-Test-Woo"] = "xyz"
+          headers
+        end
+      end
+      it "Allows for header modifications" do
+        plugin_instance = Plugin::Instance.new
+        plugin_instance.register_modifier(:web_hook_event_headers, &modifier_block)
+
+        stub_request(:post, post_hook.payload_url).to_return(body: "OK", status: 200)
+
+        topic_event_type = WebHookEventType.all.first
+        web_hook_id = Fabricate("#{topic_event_type.name.gsub("_created", "")}_web_hook").id
+
+        job.execute(
+          web_hook_id: web_hook_id,
+          event_type: topic_event_type.name,
+          payload: { test: "some payload" }.to_json,
+        )
+        webhook_event = WebHookEvent.last
+        expect(JSON.parse(webhook_event.headers)).to include("D-Test-Woo" => "xyz")
+      ensure
+        DiscoursePluginRegistry.unregister_modifier(
+          plugin_instance,
+          :web_hook_event_headers,
+          &modifier_block
+        )
+      end
     end
   end
 end

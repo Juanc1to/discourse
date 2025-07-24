@@ -2,7 +2,7 @@ import { htmlSafe } from "@ember/template";
 import { emojiUnescape } from "discourse/lib/text";
 import UserMenuBaseItem from "discourse/lib/user-menu/base-item";
 import { postUrl } from "discourse/lib/utilities";
-import I18n from "discourse-i18n";
+import { i18n } from "discourse-i18n";
 
 export default class UserMenuMessageItem extends UserMenuBaseItem {
   constructor({ message }) {
@@ -11,7 +11,11 @@ export default class UserMenuMessageItem extends UserMenuBaseItem {
   }
 
   get className() {
-    return "message";
+    let classNames = ["message"];
+
+    classNames.push(this.message.unread ? "unread" : "read");
+
+    return classNames.join(" ");
   }
 
   get linkHref() {
@@ -23,7 +27,7 @@ export default class UserMenuMessageItem extends UserMenuBaseItem {
   }
 
   get linkTitle() {
-    return I18n.t("user.private_message");
+    return i18n("user.private_message");
   }
 
   get icon() {
@@ -31,7 +35,11 @@ export default class UserMenuMessageItem extends UserMenuBaseItem {
   }
 
   get label() {
-    return this.message.last_poster_username;
+    if (!this.siteSettings.prioritize_full_name_in_ux) {
+      return this.message.last_poster_username;
+    }
+
+    return this.message.last_poster_name || this.message.last_poster_username;
   }
 
   get description() {

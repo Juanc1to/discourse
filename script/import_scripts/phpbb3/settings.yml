@@ -98,7 +98,7 @@ import:
     original: oldsite.example.com/forums    # without http(s)://
     new: http://discourse.example.com       # with http:// or https://
 
-  # Enable this, if you want to redirect old forum links to the the new locations.
+  # Enable this, if you want to redirect old forum links to the new locations.
   permalinks:
     categories: true  # redirects   /viewforum.php?f=1            to  /c/category-name
     topics: true      # redirects   /viewtopic.php?f=6&t=43       to  /t/topic-name/81
@@ -118,7 +118,7 @@ import:
 
   # Enable this, if you want import password hashes in order to use the "migratepassword" plugin.
   # This will allow users to login with their current password.
-  # The plugin is available at: https://github.com/discoursehosting/discourse-migratepassword
+  # The plugin is available at: https://github.com/communiteq/discourse-migratepassword
   passwords: false
 
   # By default all the following things get imported. You can disable them by setting them to false.

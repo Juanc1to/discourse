@@ -1,6 +1,6 @@
 import QUnit, { module, test } from "qunit";
-import sinon from "sinon";
-import I18n from "discourse-i18n";
+import { i18n } from "discourse-i18n";
+import freezeTime from "../helpers/freeze-time";
 import LocalDateBuilder from "../lib/local-date-builder";
 
 const UTC = "Etc/UTC";
@@ -11,24 +11,6 @@ const PARIS = "Europe/Paris";
 const LAGOS = "Africa/Lagos";
 const LONDON = "Europe/London";
 const SINGAPORE = "Asia/Singapore";
-
-export function freezeTime({ date, timezone }, cb) {
-  date = date || "2020-01-22 10:34";
-  const newTimezone = timezone || PARIS;
-  const previousZone = moment.tz.guess();
-  const now = moment.tz(date, newTimezone).valueOf();
-
-  sinon.useFakeTimers(now);
-  sinon.stub(moment.tz, "guess");
-  moment.tz.guess.returns(newTimezone);
-  moment.tz.setDefault(newTimezone);
-
-  cb();
-
-  moment.tz.guess.returns(previousZone);
-  moment.tz.setDefault(previousZone);
-  sinon.restore();
-}
 
 QUnit.assert.buildsCorrectDate = function (options, expected, message) {
   const localTimezone = options.localTimezone || PARIS;
@@ -301,7 +283,7 @@ module("Unit | Library | local-date-builder", function () {
           timezone: PARIS,
         },
         {
-          formatted: I18n.t(
+          formatted: i18n(
             "discourse_local_dates.relative_dates.countdown.passed"
           ),
         },
@@ -485,7 +467,7 @@ module("Unit | Library | local-date-builder", function () {
             {
               current: true,
               formatted:
-                'Sunday, March 22, 2020 <br /><svg class=\'fa d-icon d-icon-clock svg-icon svg-string\' xmlns="http://www.w3.org/2000/svg"><use href="#clock" /></svg> 12:00 AM → 1:30 AM',
+                "Sunday, March 22, 2020 <br /><svg class='fa d-icon d-icon-clock svg-icon svg-string' aria-hidden='true' xmlns=\"http://www.w3.org/2000/svg\"><use href=\"#clock\" /></svg> 12:00 AM → 1:30 AM",
               timezone: "Paris",
             },
           ],
@@ -517,7 +499,7 @@ module("Unit | Library | local-date-builder", function () {
             {
               current: true,
               formatted:
-                'Sunday, March 22, 2020 <br /><svg class=\'fa d-icon d-icon-clock svg-icon svg-string\' xmlns="http://www.w3.org/2000/svg"><use href="#clock" /></svg> 11:34 AM',
+                "Sunday, March 22, 2020 <br /><svg class='fa d-icon d-icon-clock svg-icon svg-string' aria-hidden='true' xmlns=\"http://www.w3.org/2000/svg\"><use href=\"#clock\" /></svg> 11:34 AM",
               timezone: "Paris",
             },
           ],
@@ -573,22 +555,22 @@ module("Unit | Library | local-date-builder", function () {
             {
               current: true,
               formatted:
-                'Tuesday, April 7, 2020 <br /><svg class=\'fa d-icon d-icon-clock svg-icon svg-string\' xmlns="http://www.w3.org/2000/svg"><use href="#clock" /></svg> 2:54 PM',
+                "Tuesday, April 7, 2020 <br /><svg class='fa d-icon d-icon-clock svg-icon svg-string' aria-hidden='true' xmlns=\"http://www.w3.org/2000/svg\"><use href=\"#clock\" /></svg> 2:54 PM",
               timezone: "Paris",
             },
             {
               formatted:
-                'Tuesday, April 7, 2020 <br /><svg class=\'fa d-icon d-icon-clock svg-icon svg-string\' xmlns="http://www.w3.org/2000/svg"><use href="#clock" /></svg> 1:54 PM',
+                "Tuesday, April 7, 2020 <br /><svg class='fa d-icon d-icon-clock svg-icon svg-string' aria-hidden='true' xmlns=\"http://www.w3.org/2000/svg\"><use href=\"#clock\" /></svg> 1:54 PM",
               timezone: "London",
             },
             {
               formatted:
-                'Tuesday, April 7, 2020 <br /><svg class=\'fa d-icon d-icon-clock svg-icon svg-string\' xmlns="http://www.w3.org/2000/svg"><use href="#clock" /></svg> 1:54 PM',
+                "Tuesday, April 7, 2020 <br /><svg class='fa d-icon d-icon-clock svg-icon svg-string' aria-hidden='true' xmlns=\"http://www.w3.org/2000/svg\"><use href=\"#clock\" /></svg> 1:54 PM",
               timezone: "Lagos",
             },
             {
               formatted:
-                'Tuesday, April 7, 2020 <br /><svg class=\'fa d-icon d-icon-clock svg-icon svg-string\' xmlns="http://www.w3.org/2000/svg"><use href="#clock" /></svg> 10:54 PM',
+                "Tuesday, April 7, 2020 <br /><svg class='fa d-icon d-icon-clock svg-icon svg-string' aria-hidden='true' xmlns=\"http://www.w3.org/2000/svg\"><use href=\"#clock\" /></svg> 10:54 PM",
               timezone: "Sydney",
             },
           ],
@@ -608,12 +590,12 @@ module("Unit | Library | local-date-builder", function () {
             {
               current: true,
               formatted:
-                'Wednesday, May 13, 2020 <br /><svg class=\'fa d-icon d-icon-clock svg-icon svg-string\' xmlns="http://www.w3.org/2000/svg"><use href="#clock" /></svg> 11:00 AM',
+                "Wednesday, May 13, 2020 <br /><svg class='fa d-icon d-icon-clock svg-icon svg-string' aria-hidden='true' xmlns=\"http://www.w3.org/2000/svg\"><use href=\"#clock\" /></svg> 11:00 AM",
               timezone: "Los Angeles",
             },
             {
               formatted:
-                'Wednesday, May 13, 2020 <br /><svg class=\'fa d-icon d-icon-clock svg-icon svg-string\' xmlns="http://www.w3.org/2000/svg"><use href="#clock" /></svg> 6:00 PM',
+                "Wednesday, May 13, 2020 <br /><svg class='fa d-icon d-icon-clock svg-icon svg-string' aria-hidden='true' xmlns=\"http://www.w3.org/2000/svg\"><use href=\"#clock\" /></svg> 6:00 PM",
               timezone: "UTC",
             },
           ],

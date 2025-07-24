@@ -5,9 +5,31 @@ RSpec.describe ApplicationHelper do
   describe "preload_script" do
     def script_tag(url, entrypoint, nonce)
       <<~HTML
-          <link rel="preload" href="#{url}" as="script" data-discourse-entrypoint="#{entrypoint}" nonce="#{nonce}">
           <script defer src="#{url}" data-discourse-entrypoint="#{entrypoint}" nonce="#{nonce}"></script>
       HTML
+    end
+
+    it "does not send crawler content to logged on users" do
+      controller.stubs(:use_crawler_layout?).returns(false)
+      helper.stubs(:current_user).returns(Fabricate(:user))
+
+      helper.request.user_agent = "Firefox"
+      expect(helper.include_crawler_content?).to eq(false)
+    end
+
+    it "sends crawler content to logged on users who wants to print" do
+      helper.stubs(:current_user).returns(Fabricate(:user))
+      controller.stubs(:use_crawler_layout?).returns(false)
+      helper.stubs(:params).returns(print: true)
+
+      expect(helper.include_crawler_content?).to eq(true)
+    end
+
+    it "sends crawler content to logged on users with a crawler user agent" do
+      helper.stubs(:current_user).returns(Fabricate(:user))
+      controller.stubs(:use_crawler_layout?).returns(true)
+
+      expect(helper.include_crawler_content?).to eq(true)
     end
 
     it "sends crawler content to old mobiles" do
@@ -40,7 +62,7 @@ RSpec.describe ApplicationHelper do
       it "deals correctly with subfolder" do
         set_subfolder "/community"
         expect(helper.preload_script("start-discourse")).to include(
-          "https://s3cdn.com/assets/start-discourse.js",
+          %r{https://s3cdn.com/assets/start-discourse-\w{8}.js},
         )
       end
 
@@ -49,7 +71,7 @@ RSpec.describe ApplicationHelper do
         set_cdn_url "https://awesome.com"
         set_subfolder "/community"
         expect(helper.preload_script("start-discourse")).to include(
-          "https://s3cdn.com/s3_subpath/assets/start-discourse.js",
+          %r{https://s3cdn.com/s3_subpath/assets/start-discourse-\w{8}.js},
         )
       end
 
@@ -57,111 +79,71 @@ RSpec.describe ApplicationHelper do
         helper.request.env["HTTP_ACCEPT_ENCODING"] = "br"
         link = helper.preload_script("start-discourse")
 
-        expect(link).to eq(
-          script_tag(
-            "https://s3cdn.com/assets/start-discourse.br.js",
-            "start-discourse",
-            helper.csp_nonce_placeholder,
-          ),
-        )
+        expect(link).to include(%r{https://s3cdn.com/assets/start-discourse-\w{8}.br.js})
       end
 
       it "gives s3 cdn if asset host is not set" do
         link = helper.preload_script("start-discourse")
 
-        expect(link).to eq(
-          script_tag(
-            "https://s3cdn.com/assets/start-discourse.js",
-            "start-discourse",
-            helper.csp_nonce_placeholder,
-          ),
-        )
+        expect(link).to include(%r{https://s3cdn.com/assets/start-discourse-\w{8}.js})
       end
 
       it "can fall back to gzip compression" do
         helper.request.env["HTTP_ACCEPT_ENCODING"] = "gzip"
         link = helper.preload_script("start-discourse")
-        expect(link).to eq(
-          script_tag(
-            "https://s3cdn.com/assets/start-discourse.gz.js",
-            "start-discourse",
-            helper.csp_nonce_placeholder,
-          ),
-        )
+        expect(link).to include(%r{https://s3cdn.com/assets/start-discourse-\w{8}.gz.js})
       end
 
       it "gives s3 cdn even if asset host is set" do
         set_cdn_url "https://awesome.com"
         link = helper.preload_script("start-discourse")
 
-        expect(link).to eq(
-          script_tag(
-            "https://s3cdn.com/assets/start-discourse.js",
-            "start-discourse",
-            helper.csp_nonce_placeholder,
-          ),
-        )
+        expect(link).to include(%r{https://s3cdn.com/assets/start-discourse-\w{8}.js})
       end
 
       it "gives s3 cdn but without brotli/gzip extensions for theme tests assets" do
         helper.request.env["HTTP_ACCEPT_ENCODING"] = "gzip, br"
         link = helper.preload_script("discourse/tests/theme_qunit_ember_jquery")
-        expect(link).to eq(
-          script_tag(
-            "https://s3cdn.com/assets/discourse/tests/theme_qunit_ember_jquery.js",
-            "discourse/tests/theme_qunit_ember_jquery",
-            helper.csp_nonce_placeholder,
-          ),
+        expect(link).to include(
+          %r{https://s3cdn.com/assets/discourse/tests/theme_qunit_ember_jquery-\w{8}.js},
         )
       end
 
       it "uses separate asset CDN if configured" do
         global_setting :s3_asset_cdn_url, "https://s3-asset-cdn.example.com"
         expect(helper.preload_script("start-discourse")).to include(
-          "https://s3-asset-cdn.example.com/assets/start-discourse.js",
+          %r{https://s3-asset-cdn.example.com/assets/start-discourse-\w{8}.js},
         )
       end
     end
   end
 
   describe "add_resource_preload_list" do
-    it "adds resources to the preload list when it's available" do
-      @links_to_preload = []
+    it "adds resources to the preload list" do
       add_resource_preload_list("/assets/start-discourse.js", "script")
       add_resource_preload_list("/assets/discourse.css", "style")
 
-      expect(@links_to_preload.size).to eq(2)
-    end
-
-    it "doesn't add resources to the preload list when it's not available" do
-      @links_to_preload = nil
-      add_resource_preload_list("/assets/start-discourse.js", "script")
-      add_resource_preload_list("/assets/discourse.css", "style")
-
-      expect(@links_to_preload).to eq(nil)
+      expect(controller.instance_variable_get(:@asset_preload_links).size).to eq(2)
     end
 
     it "adds resources to the preload list when preload_script is called" do
-      @links_to_preload = []
       helper.preload_script("start-discourse")
 
-      expect(@links_to_preload.size).to eq(1)
+      expect(controller.instance_variable_get(:@asset_preload_links).size).to eq(1)
     end
 
     it "adds resources to the preload list when discourse_stylesheet_link_tag is called" do
-      @links_to_preload = []
       helper.discourse_stylesheet_link_tag(:desktop)
 
-      expect(@links_to_preload.size).to eq(1)
+      expect(controller.instance_variable_get(:@asset_preload_links).size).to eq(1)
     end
 
     it "adds resources as the correct type" do
-      @links_to_preload = []
       helper.discourse_stylesheet_link_tag(:desktop)
       helper.preload_script("start-discourse")
 
-      expect(@links_to_preload[0]).to match(/as="style"/)
-      expect(@links_to_preload[1]).to match(/as="script"/)
+      expect(controller.instance_variable_get(:@asset_preload_links)[0]).to match(/as="style"/)
+      expect(controller.instance_variable_get(:@asset_preload_links)[1]).to match(/as="script"/)
     end
   end
 
@@ -555,14 +537,24 @@ RSpec.describe ApplicationHelper do
   end
 
   describe "preloaded_json" do
-    it "returns empty JSON if preloaded is empty" do
-      @preloaded = nil
+    fab!(:user)
+
+    it "returns empty JSON if preloader is not initialized" do
+      @application_layout_preloader = nil
       expect(helper.preloaded_json).to eq("{}")
     end
 
     it "escapes and strips invalid unicode and strips in json body" do
-      @preloaded = { test: %{["< \x80"]} }
-      expect(helper.preloaded_json).to eq(%{{"test":"[\\"\\u003c \uFFFD\\"]"}})
+      @application_layout_preloader =
+        ApplicationLayoutPreloader.new(
+          guardian: Guardian.new(user),
+          theme_id: nil,
+          theme_target: nil,
+          login_method: nil,
+        )
+
+      @application_layout_preloader.store_preloaded("test", %{["< \x80"]})
+      expect(helper.preloaded_json).to include(%{"test":"[\\"\\u003c \uFFFD\\"]"})
     end
   end
 
@@ -606,7 +598,7 @@ RSpec.describe ApplicationHelper do
       it "returns the correct image" do
         SiteSetting.opengraph_image = Fabricate(:upload, url: "/images/og-image.png")
 
-        SiteSetting.twitter_summary_large_image = Fabricate(:upload, url: "/images/twitter.png")
+        SiteSetting.x_summary_large_image = Fabricate(:upload, url: "/images/twitter.png")
 
         SiteSetting.large_icon = Fabricate(:upload, url: "/images/large_icon.png")
 
@@ -621,11 +613,9 @@ RSpec.describe ApplicationHelper do
 
         SiteSetting.opengraph_image = nil
 
-        expect(helper.crawlable_meta_data).to include(
-          SiteSetting.site_twitter_summary_large_image_url,
-        )
+        expect(helper.crawlable_meta_data).to include(SiteSetting.site_x_summary_large_image_url)
 
-        SiteSetting.twitter_summary_large_image = nil
+        SiteSetting.x_summary_large_image = nil
 
         expect(helper.crawlable_meta_data).to include(SiteSetting.site_large_icon_url)
 
@@ -655,13 +645,13 @@ RSpec.describe ApplicationHelper do
         <meta name=\"twitter:image\" content=\"#{SiteSetting.site_logo_url}\" />
         HTML
 
-        SiteSetting.twitter_summary_large_image = Fabricate(:upload, url: "/images/twitter.png")
+        SiteSetting.x_summary_large_image = Fabricate(:upload, url: "/images/twitter.png")
 
         expect(helper.crawlable_meta_data).to include(<<~HTML)
-        <meta name=\"twitter:image\" content=\"#{SiteSetting.site_twitter_summary_large_image_url}\" />
+        <meta name=\"twitter:image\" content=\"#{SiteSetting.site_x_summary_large_image_url}\" />
         HTML
 
-        SiteSetting.twitter_summary_large_image = Fabricate(:upload, url: "/images/twitter.svg")
+        SiteSetting.x_summary_large_image = Fabricate(:upload, url: "/images/twitter.svg")
 
         expect(helper.crawlable_meta_data).to include(<<~HTML)
         <meta name=\"twitter:image\" content=\"#{SiteSetting.site_logo_url}\" />
@@ -724,6 +714,97 @@ RSpec.describe ApplicationHelper do
           "<meta property=\"og:site_name\" content=\"#{SiteSetting.title}\" />",
         )
       end
+    end
+  end
+
+  describe "#title_content" do
+    it "returns the correct title" do
+      SiteSetting.title = "Test Title"
+      result = helper.title_content
+
+      expect(result).to include("Test Title")
+    end
+
+    it "accepts a content argument" do
+      helper.stubs(:content_for?).with(:title).returns(true)
+      helper.stubs(:content_for).with(:title).returns("Custom Title")
+
+      result = helper.title_content
+
+      expect(result).to include("Custom Title")
+    end
+  end
+
+  describe "#description_content" do
+    it "returns the correct description" do
+      SiteSetting.site_description = "Test Description"
+      result = helper.description_content
+
+      expect(result).to include("Test Description")
+    end
+
+    it "accepts a content argument" do
+      @description_meta = "Custom Description"
+
+      result = helper.description_content
+
+      expect(result).to include("Custom Description")
+    end
+  end
+
+  describe "when a plugin registers the :meta_data_content modifier" do
+    let!(:plugin) { Plugin::Instance.new }
+    let!(:modifier) { :meta_data_content }
+    let!(:block) do
+      Proc.new do |content, property, opts|
+        next "modified by plugin" if property == :description
+        next "BIG TITLE" if property == :title
+        content
+      end
+    end
+
+    before { DiscoursePluginRegistry.register_modifier(plugin, modifier, &block) }
+    after { DiscoursePluginRegistry.unregister_modifier(plugin, modifier, &block) }
+
+    it "allows the plugin to modify the meta tags" do
+      result =
+        helper.crawlable_meta_data(
+          description: "This is a test description",
+          title: "to be overridden",
+        )
+
+      expect(result).to include(
+        "<meta property=\"og:description\" content=\"modified by plugin\" />",
+      )
+      expect(result).to include("<meta property=\"og:title\" content=\"BIG TITLE\" />")
+    end
+
+    it "modifies the title tag" do
+      title = helper.title_content
+
+      expect(title).to include("BIG TITLE")
+    end
+
+    it "modifies the description tag" do
+      description = helper.description_content
+
+      expect(description).to include("modified by plugin")
+    end
+
+    it "does not modify the `title` SiteSetting" do
+      SiteSetting.title = "Test Title"
+      result = helper.title_content
+
+      expect(result).to include("BIG TITLE")
+      expect(SiteSetting.title).to eq("Test Title")
+    end
+
+    it "does not modify the `site_description` SiteSetting" do
+      SiteSetting.site_description = "Test Description"
+      result = helper.description_content
+
+      expect(result).to include("modified by plugin")
+      expect(SiteSetting.site_description).to eq("Test Description")
     end
   end
 
@@ -867,12 +948,20 @@ RSpec.describe ApplicationHelper do
   describe "#discourse_theme_color_meta_tags" do
     before do
       light = Fabricate(:color_scheme)
-      light.color_scheme_colors << ColorSchemeColor.new(name: "header_background", hex: "abcdef")
+      light.color_scheme_colors << ColorSchemeColor.new(
+        name: "header_background",
+        hex: "abcdef",
+        dark_hex: "fedcba",
+      )
       light.save!
       helper.request.cookies["color_scheme_id"] = light.id
 
       dark = Fabricate(:color_scheme)
-      dark.color_scheme_colors << ColorSchemeColor.new(name: "header_background", hex: "defabc")
+      dark.color_scheme_colors << ColorSchemeColor.new(
+        name: "header_background",
+        hex: "defabc",
+        dark_hex: "cbafed",
+      )
       dark.save!
       helper.request.cookies["dark_scheme_id"] = dark.id
     end
@@ -891,6 +980,81 @@ RSpec.describe ApplicationHelper do
       expect(helper.discourse_theme_color_meta_tags).to eq(<<~HTML)
         <meta name="theme-color" media="all" content="#abcdef">
       HTML
+    end
+
+    context "when use_overhauled_theme_color_palette setting is true" do
+      before { SiteSetting.use_overhauled_theme_color_palette = true }
+
+      it "renders a light and dark theme-color meta tag using the light and dark palettes of the same color scheme record" do
+        expect(helper.discourse_theme_color_meta_tags).to eq(<<~HTML)
+          <meta name="theme-color" media="(prefers-color-scheme: light)" content="#abcdef">
+          <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#fedcba">
+        HTML
+      end
+    end
+  end
+
+  describe "#discourse_color_scheme_meta_tag" do
+    fab!(:color_scheme)
+
+    before { SiteSetting.default_dark_mode_color_scheme_id = -1 }
+
+    it "renders a 'light' color-scheme if no dark scheme is set and the current scheme is light" do
+      ColorSchemeRevisor.revise(
+        color_scheme,
+        colors: [{ name: "primary", hex: "333333" }, { name: "secondary", hex: "DDDDDD" }],
+      )
+
+      helper.request.cookies["color_scheme_id"] = color_scheme.id
+
+      expect(helper.discourse_color_scheme_meta_tag).to eq(<<~HTML)
+        <meta name="color-scheme" content="light">
+      HTML
+    end
+
+    it "renders a 'dark' color-scheme if no dark scheme is set and the default scheme is dark" do
+      ColorSchemeRevisor.revise(
+        color_scheme,
+        colors: [{ name: "primary", hex: "F8F8F8" }, { name: "secondary", hex: "232323" }],
+      )
+      @scheme_id = color_scheme.id
+
+      expect(helper.discourse_color_scheme_meta_tag).to eq(<<~HTML)
+        <meta name="color-scheme" content="dark">
+      HTML
+    end
+
+    it "renders a 'light dark' color-scheme if a dark scheme is set" do
+      dark = Fabricate(:color_scheme)
+      dark.save!
+      helper.request.cookies["dark_scheme_id"] = dark.id
+
+      expect(helper.discourse_color_scheme_meta_tag).to eq(<<~HTML)
+        <meta name="color-scheme" content="light dark">
+      HTML
+    end
+  end
+
+  describe "#dark_scheme_id" do
+    fab!(:dark_scheme, :color_scheme)
+    fab!(:light_scheme, :color_scheme)
+
+    before do
+      helper.request.cookies["color_scheme_id"] = light_scheme.id
+      helper.request.cookies["dark_scheme_id"] = dark_scheme.id
+    end
+
+    it "returns the value set in the dark_scheme_id cookie" do
+      expect(helper.dark_scheme_id).to eq(dark_scheme.id)
+    end
+
+    context "when use_overhauled_theme_color_palette is true" do
+      before { SiteSetting.use_overhauled_theme_color_palette = true }
+
+      it "returns the same value as #scheme_id" do
+        expect(helper.dark_scheme_id).to eq(helper.scheme_id)
+        expect(helper.scheme_id).to eq(light_scheme.id)
+      end
     end
   end
 end

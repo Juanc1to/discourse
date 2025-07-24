@@ -22,6 +22,10 @@ export const SIDEBAR_SECTION = {
   max_title_length: 30,
 };
 
+export const CATEGORY_STYLE_TYPES = { square: 0, icon: 1, emoji: 2 };
+
+export const CATEGORY_TEXT_COLORS = ["FFFFFF", "000000"];
+
 export const AUTO_GROUPS = {
   everyone: {
     id: 0,
@@ -69,4 +73,34 @@ export const AUTO_GROUPS = {
   },
 };
 
+export const GROUP_SMTP_SSL_MODES = { none: 0, ssl_tls: 1, starttls: 2 };
+
+export const MAX_AUTO_MEMBERSHIP_DOMAINS_LOOKUP = 10;
+
 export const MAX_NOTIFICATIONS_LIMIT_PARAMS = 60;
+
+export const TOPIC_VISIBILITY_REASONS = {
+  op_flag_threshold_reached: 0,
+  op_unhidden: 1,
+  embedded_topic: 2,
+  manually_unlisted: 3,
+  manually_relisted: 4,
+  bulk_action: 5,
+  unknown: 99,
+};
+
+export const MAX_UNOPTIMIZED_CATEGORIES = 1000;
+
+export const REVIEWABLE_UNKNOWN_TYPE_SOURCE = "unknown";
+
+export const ADMIN_SEARCH_RESULT_TYPES = [
+  "page",
+  "setting",
+  "theme",
+  "component",
+  "report",
+];
+
+export const API_KEY_SCOPE_MODES = ["global", "read_only", "granular"];
+
+export const INVITE_DESCRIPTION_MAX_LENGTH = 100;

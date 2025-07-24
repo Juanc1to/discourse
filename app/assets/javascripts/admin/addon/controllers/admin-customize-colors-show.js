@@ -1,13 +1,14 @@
 import Controller from "@ember/controller";
 import { action, computed } from "@ember/object";
-import { inject as service } from "@ember/service";
+import { service } from "@ember/service";
+import discourseLater from "discourse/lib/later";
 import { clipboardCopy } from "discourse/lib/utilities";
-import discourseLater from "discourse-common/lib/later";
-import I18n from "discourse-i18n";
+import { i18n } from "discourse-i18n";
 
 export default class AdminCustomizeColorsShowController extends Controller {
   @service dialog;
   @service router;
+
   onlyOverridden = false;
 
   @computed("model.colors.[]", "onlyOverridden")
@@ -34,12 +35,12 @@ export default class AdminCustomizeColorsShowController extends Controller {
     if (clipboardCopy(this.model.schemeJson())) {
       this.set(
         "model.savingStatus",
-        I18n.t("admin.customize.copied_to_clipboard")
+        i18n("admin.customize.copied_to_clipboard")
       );
     } else {
       this.set(
         "model.savingStatus",
-        I18n.t("admin.customize.copy_to_clipboard_error")
+        i18n("admin.customize.copy_to_clipboard_error")
       );
     }
 
@@ -53,13 +54,13 @@ export default class AdminCustomizeColorsShowController extends Controller {
     const newColorScheme = this.model.copy();
     newColorScheme.set(
       "name",
-      I18n.t("admin.customize.colors.copy_name_prefix") +
+      i18n("admin.customize.colors.copy_name_prefix") +
         " " +
         this.get("model.name")
     );
     newColorScheme.save().then(() => {
       this.allColors.pushObject(newColorScheme);
-      this.router.replaceWith("adminCustomize.colors.show", newColorScheme);
+      this.router.replaceWith("adminCustomize.colors-show", newColorScheme);
     });
   }
 
@@ -75,8 +76,8 @@ export default class AdminCustomizeColorsShowController extends Controller {
 
   @action
   destroy() {
-    return this.dialog.yesNoConfirm({
-      message: I18n.t("admin.customize.colors.delete_confirm"),
+    return this.dialog.deleteConfirm({
+      title: i18n("admin.customize.colors.delete_confirm"),
       didConfirm: () => {
         return this.model.destroy().then(() => {
           this.allColors.removeObject(this.model);

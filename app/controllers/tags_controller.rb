@@ -142,6 +142,20 @@ class TagsController < ::ApplicationController
 
   Discourse.filters.each do |filter|
     define_method("show_#{filter}") do
+      parent_tag_name =
+        Tag
+          .where_name(params[:tag_id])
+          .where.not(target_tag_id: nil)
+          .joins(
+            "JOIN tags parent_tags ON parent_tags.id = tags.target_tag_id AND tags.target_tag_id != tags.id",
+          )
+          .pick("parent_tags.name")
+
+      if parent_tag_name
+        params[:tag_id] = parent_tag_name
+        return redirect_to url_for(params.to_unsafe_hash)
+      end
+
       @tag_id = params[:tag_id].force_encoding("UTF-8")
       @additional_tags =
         params[:additional_tag_ids].to_s.split("/").map { |t| t.force_encoding("UTF-8") }
@@ -162,8 +176,8 @@ class TagsController < ::ApplicationController
       @list.more_topics_url = construct_url_with(:next, list_opts)
       @list.prev_topics_url = construct_url_with(:prev, list_opts)
       @rss = "tag"
-      @description_meta = I18n.t("rss_by_tag", tag: tag_params.join(" & "))
-      @title = @description_meta
+      @title = I18n.t("rss_by_tag", tag: tag_params.join(" & "))
+      @description_meta = Tag.where(name: @tag_id).pick(:description) || @title
 
       canonical_params = params.slice(:category_slug_path_with_id, :tag_id)
       canonical_method = url_method(canonical_params)
@@ -231,7 +245,7 @@ class TagsController < ::ApplicationController
             if tag_group_name
               tag_group =
                 TagGroup.find_by(name: tag_group_name) || TagGroup.create!(name: tag_group_name)
-              tag.tag_groups << tag_group unless tag.tag_groups.include?(tag_group)
+              tag.tag_groups << tag_group if tag.tag_groups.exclude?(tag_group)
             end
           end
         end
@@ -585,6 +599,6 @@ class TagsController < ::ApplicationController
   end
 
   def tag_params
-    Array(params[:tags]).concat(Array(@additional_tags))
+    Array(params[:tags]).map(&:to_s).concat(Array(@additional_tags))
   end
 end

@@ -103,7 +103,14 @@ class UserBadgesController < ApplicationController
       end
     end
 
-    user_badge = BadgeGranter.grant(badge, user, granted_by: current_user, post_id: post_id)
+    grant_opts_from_params =
+      DiscoursePluginRegistry.apply_modifier(
+        :user_badges_badge_grant_opts,
+        { granted_by: current_user, post_id: post_id },
+        { param: params },
+      )
+
+    user_badge = BadgeGranter.grant(badge, user, grant_opts_from_params)
 
     render_serialized(user_badge, DetailedUserBadgeSerializer, root: "user_badge")
   end
@@ -128,16 +135,18 @@ class UserBadgesController < ApplicationController
 
     return render json: failed_json, status: 403 unless can_favorite_badge?(user_badge)
 
-    if !user_badge.is_favorite &&
+    is_favorite = user_badges.where(badge: user_badge.badge, is_favorite: true).exists?
+
+    if !is_favorite &&
          user_badges.select(:badge_id).distinct.where(is_favorite: true).count >=
            SiteSetting.max_favorite_badges
       return render json: failed_json, status: 400
     end
 
     UserBadge.where(user_id: user_badge.user_id, badge_id: user_badge.badge_id).update_all(
-      is_favorite: !user_badge.is_favorite,
+      is_favorite: !is_favorite,
     )
-    UserBadge.update_featured_ranks!(user_badge.user_id)
+    UserBadge.update_featured_ranks!([user_badge.user_id])
   end
 
   private

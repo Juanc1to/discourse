@@ -1,6 +1,6 @@
-import { inject as service } from "@ember/service";
+import { service } from "@ember/service";
 import HashtagTypeBase from "discourse/lib/hashtag-types/base";
-import { iconHTML } from "discourse-common/lib/icon-library";
+import { iconHTML } from "discourse/lib/icon-library";
 
 export default class ChannelHashtagType extends HashtagTypeBase {
   @service chatChannelsManager;
@@ -38,6 +38,6 @@ export default class ChannelHashtagType extends HashtagTypeBase {
   }
 
   isLoaded(id) {
-    return !this.site.lazy_load_categories || super.isLoaded(id);
+    return super.isLoaded(id);
   }
 }

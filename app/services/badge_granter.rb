@@ -102,7 +102,7 @@ class BadgeGranter
         user_id: user.id,
         badge_id: badge.id,
       )
-      notification = send_notification(user.id, user.username, user.locale, badge)
+      notification = send_notification(user.id, user.username, user.effective_locale, badge)
 
       DB.exec(<<~SQL, notification_id: notification.id, user_id: user.id, badge_id: badge.id)
         UPDATE user_badges
@@ -110,7 +110,7 @@ class BadgeGranter
         WHERE notification_id IS NULL AND user_id = :user_id AND badge_id = :badge_id
       SQL
 
-      UserBadge.update_featured_ranks!(user.id)
+      UserBadge.update_featured_ranks!([user.id])
     end
   end
 
@@ -155,6 +155,8 @@ class BadgeGranter
             self.class.send_notification(@user.id, @user.username, @user.effective_locale, @badge)
           user_badge.update!(notification_id: notification.id)
         end
+        is_favorite = @user.user_badges.where(badge: @badge, is_favorite: true).exists?
+        user_badge.update!(is_favorite: true) if is_favorite
       end
     end
 
@@ -244,7 +246,7 @@ class BadgeGranter
       post_ids = list.flat_map { |i| i["post_ids"] }.compact.uniq
       user_ids = list.flat_map { |i| i["user_ids"] }.compact.uniq
 
-      next unless post_ids.present? || user_ids.present?
+      next if post_ids.blank? && user_ids.blank?
 
       find_by_type(type).each { |badge| backfill(badge, post_ids: post_ids, user_ids: user_ids) }
     end
@@ -368,7 +370,7 @@ class BadgeGranter
       end
       if opts[:target_posts]
         raise "Query did not return a post ID" unless result.post_id
-        unless Post.exists?(result.post_id).present?
+        if Post.exists?(result.post_id).blank?
           raise "Query returned a non-existent post ID:\n#{result.post_id}"
         end
       end
@@ -379,11 +381,11 @@ class BadgeGranter
     { errors: e.message }
   end
 
-  MAX_ITEMS_FOR_DELTA ||= 200
+  MAX_ITEMS_FOR_DELTA = 200
   def self.backfill(badge, opts = nil)
     return unless SiteSetting.enable_badges
     return unless badge.enabled
-    return unless badge.query.present?
+    return if badge.query.blank?
 
     post_ids = user_ids = nil
     post_ids = opts[:post_ids] if opts
@@ -404,8 +406,9 @@ class BadgeGranter
     post_clause = badge.target_posts ? "AND (q.post_id = ub.post_id OR NOT :multiple_grant)" : ""
     post_id_field = badge.target_posts ? "q.post_id" : "NULL"
 
-    sql = <<~SQL
-      DELETE FROM user_badges
+    if badge.auto_revoke && full_backfill
+      sql = <<~SQL
+        DELETE FROM user_badges
         WHERE id IN (
           SELECT ub.id
           FROM user_badges ub
@@ -415,17 +418,22 @@ class BadgeGranter
           #{post_clause}
           WHERE ub.badge_id = :id AND q.user_id IS NULL
         )
-    SQL
+        RETURNING user_badges.user_id
+      SQL
 
-    if badge.auto_revoke && full_backfill
-      DB.exec(
-        sql,
-        id: badge.id,
-        post_ids: [-1],
-        user_ids: [-2],
-        backfill: true,
-        multiple_grant: true, # cheat here, cause we only run on backfill and are deleting
-      )
+      rows =
+        DB.query(
+          sql,
+          id: badge.id,
+          post_ids: [-1],
+          user_ids: [-2],
+          backfill: true,
+          multiple_grant: true, # cheat here, cause we only run on backfill and are deleting
+        )
+
+      if (revoked_callback = opts&.dig(:revoked_callback)) && rows.size > 0
+        revoked_callback.call(rows.map { |r| r.user_id })
+      end
     end
 
     sql = <<~SQL
@@ -465,35 +473,40 @@ class BadgeGranter
       return
     end
 
-    builder
-      .query(
+    rows =
+      builder.query(
         id: badge.id,
         multiple_grant: badge.multiple_grant,
         backfill: full_backfill,
         post_ids: post_ids || [-2],
         user_ids: user_ids || [-2],
       )
-      .each do |row|
-        next if suppress_notification?(badge, row.granted_at, row.skip_new_user_tips)
-        next if row.staff && badge.awarded_for_trust_level?
 
-        notification = send_notification(row.user_id, row.username, row.locale, badge)
-        UserBadge.trigger_user_badge_granted_event(badge.id, row.user_id)
+    if (granted_callback = opts&.dig(:granted_callback)) && rows.size > 0
+      granted_callback.call(rows.map { |r| r.user_id })
+    end
 
-        DB.exec(
-          "UPDATE user_badges SET notification_id = :notification_id WHERE id = :id",
-          notification_id: notification.id,
-          id: row.id,
-        )
-      end
+    rows.each do |row|
+      next if suppress_notification?(badge, row.granted_at, row.skip_new_user_tips)
+      next if row.staff && badge.awarded_for_trust_level?
+
+      notification = send_notification(row.user_id, row.username, row.locale, badge)
+      UserBadge.trigger_user_badge_granted_event(badge.id, row.user_id)
+
+      DB.exec(
+        "UPDATE user_badges SET notification_id = :notification_id WHERE id = :id",
+        notification_id: notification.id,
+        id: row.id,
+      )
+    end
 
     badge.reset_grant_count!
   rescue => e
     raise GrantError, "Failed to backfill '#{badge.name}' badge: #{opts}. Reason: #{e.message}"
   end
 
-  def self.revoke_ungranted_titles!
-    DB.exec <<~SQL
+  def self.revoke_ungranted_titles!(user_ids = nil)
+    DB.exec <<~SQL, user_ids: user_ids
       UPDATE users u
       SET title = ''
       FROM user_profiles up
@@ -509,15 +522,17 @@ class BadgeGranter
             AND b.allow_title
             AND b.enabled
         )
+        #{user_ids.present? ? "AND u.id IN (:user_ids)" : ""}
     SQL
 
-    DB.exec <<~SQL
+    DB.exec <<~SQL, user_ids: user_ids
       UPDATE user_profiles up
       SET granted_title_badge_id = NULL
       FROM users u
       WHERE up.user_id = u.id
         AND (u.title IS NULL OR u.title = '')
         AND up.granted_title_badge_id IS NOT NULL
+        #{user_ids.present? ? "AND up.user_id IN (:user_ids)" : ""}
     SQL
   end
 

@@ -63,6 +63,13 @@
     p:last-of-type {
       margin-bottom: 0;
     }
+
+    .lazy-video-container {
+      height: 150px;
+      max-width: calc(150px / 9 * 16);
+      margin: 1em 0 0.5em 0;
+      padding: 0;
+    }
   }
 
   .topic-body .cooked & {
@@ -77,6 +84,8 @@
         }
 
         .chat-transcript-thread {
+          min-width: 0;
+
           &-header {
             margin-bottom: 0.5rem;
           }
@@ -105,7 +114,6 @@
 
     .chat-transcript-reaction {
       @include chat-reaction;
-
       pointer-events: none;
     }
   }
@@ -113,6 +121,7 @@
   .chat-transcript-images.onebox {
     display: flex;
     flex-wrap: wrap;
+
     img {
       width: auto;
       max-height: 150px;
@@ -123,5 +132,11 @@
 
   pre code {
     box-sizing: border-box;
+  }
+}
+
+.ProseMirror {
+  .chat-transcript {
+    white-space: normal;
   }
 }

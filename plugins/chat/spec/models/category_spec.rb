@@ -1,10 +1,8 @@
 # frozen_string_literal: true
 
-require "rails_helper"
-
 RSpec.describe Category do
   it_behaves_like "a chatable model" do
-    fab!(:chatable) { Fabricate(:category) }
+    fab!(:chatable, :category)
     let(:channel_class) { Chat::CategoryChannel }
   end
 

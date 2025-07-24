@@ -41,7 +41,7 @@ module Chat
     def build_actions(actions, guardian, args)
       return unless pending?
 
-      return build_action(actions, :ignore, icon: "external-link-alt") if chat_message.blank?
+      return build_action(actions, :ignore, icon: "up-right-from-square") if chat_message.blank?
 
       agree =
         actions.add_bundle(
@@ -79,10 +79,10 @@ module Chat
 
       ignore_bundle = actions.add_bundle("#{id}-ignore", label: "reviewables.actions.ignore.title")
 
-      build_action(actions, :ignore, icon: "external-link-alt", bundle: ignore_bundle)
+      build_action(actions, :ignore, icon: "up-right-from-square", bundle: ignore_bundle)
 
       unless chat_message.deleted_at?
-        build_action(actions, :delete_and_agree, icon: "far-trash-alt", bundle: ignore_bundle)
+        build_action(actions, :delete_and_agree, icon: "trash-can", bundle: ignore_bundle)
       end
     end
 
@@ -112,6 +112,10 @@ module Chat
 
     def perform_delete_and_ignore(performed_by, args)
       ignore { chat_message.trash!(performed_by) }
+    end
+
+    def perform_agree_and_keep_deleted(performed_by, args)
+      agree
     end
 
     private
@@ -163,3 +167,41 @@ module Chat
     end
   end
 end
+
+# == Schema Information
+#
+# Table name: reviewables
+#
+#  id                      :bigint           not null, primary key
+#  type                    :string           not null
+#  status                  :integer          default("pending"), not null
+#  created_by_id           :integer          not null
+#  reviewable_by_moderator :boolean          default(FALSE), not null
+#  category_id             :integer
+#  topic_id                :integer
+#  score                   :float            default(0.0), not null
+#  potential_spam          :boolean          default(FALSE), not null
+#  target_id               :integer
+#  target_type             :string
+#  target_created_by_id    :integer
+#  payload                 :json
+#  version                 :integer          default(0), not null
+#  latest_score            :datetime
+#  created_at              :datetime         not null
+#  updated_at              :datetime         not null
+#  force_review            :boolean          default(FALSE), not null
+#  reject_reason           :text
+#  potentially_illegal     :boolean          default(FALSE)
+#  type_source             :string           default("unknown"), not null
+#
+# Indexes
+#
+#  idx_reviewables_score_desc_created_at_desc                  (score,created_at)
+#  index_reviewables_on_reviewable_by_group_id                 (reviewable_by_group_id)
+#  index_reviewables_on_status_and_created_at                  (status,created_at)
+#  index_reviewables_on_status_and_score                       (status,score)
+#  index_reviewables_on_status_and_type                        (status,type)
+#  index_reviewables_on_target_id_where_post_type_eq_post      (target_id) WHERE ((target_type)::text = 'Post'::text)
+#  index_reviewables_on_topic_id_and_status_and_created_by_id  (topic_id,status,created_by_id)
+#  index_reviewables_on_type_and_target_id                     (type,target_id) UNIQUE
+#

@@ -7,7 +7,6 @@ RSpec.describe ThemeField do
   before do
     SvgSprite.clear_plugin_svg_sprite_cache!
     ThemeJavascriptCompiler.disable_terser!
-    SiteSetting.experimental_objects_type_for_theme_settings = true
   end
 
   after { ThemeJavascriptCompiler.enable_terser! }
@@ -31,25 +30,25 @@ RSpec.describe ThemeField do
 
   it "does not insert a script tag when there are no inline script" do
     theme_field =
-      ThemeField.create!(theme_id: 1, target_id: 0, name: "body_tag", value: "<div>new div</div>")
+      ThemeField.create!(theme_id: -1, target_id: 0, name: "body_tag", value: "<div>new div</div>")
     theme_field.ensure_baked!
     expect(theme_field.value_baked).to_not include("<script")
   end
 
   it "adds an error when optimized image links are included" do
-    theme_field = ThemeField.create!(theme_id: 1, target_id: 0, name: "body_tag", value: <<~HTML)
+    theme_field = theme.set_field(target: :common, name: :body_tag, value: <<~HTML)
       <img src="http://mysite.invalid/uploads/default/optimized/1X/6d749a141f513f88f167e750e528515002043da1_2_1282x1000.png"/>
     HTML
-    theme_field.ensure_baked!
-    expect(theme_field.error).to include(I18n.t("themes.errors.optimized_link"))
+    theme.save!
+    expect(theme_field.reload.error).to include(I18n.t("themes.errors.optimized_link"))
 
-    theme_field = ThemeField.create!(theme_id: 1, target_id: 0, name: "scss", value: <<~SCSS)
+    theme_field = theme.set_field(target: :common, name: :scss, value: <<~SCSS)
       body {
         background: url(http://mysite.invalid/uploads/default/optimized/1X/6d749a141f513f88f167e750e528515002043da1_2_1282x1000.png);
       }
     SCSS
-    theme_field.ensure_baked!
-    expect(theme_field.error).to include(I18n.t("themes.errors.optimized_link"))
+    theme.save!
+    expect(theme_field.reload.error).to include(I18n.t("themes.errors.optimized_link"))
 
     theme_field.update(value: <<~SCSS)
       body {
@@ -60,7 +59,7 @@ RSpec.describe ThemeField do
     expect(theme_field.error).to eq(nil)
   end
 
-  it "only extracts inline javascript to an external file" do
+  it "extracts inline javascript to an external file" do
     html = <<~HTML
       <script type="text/discourse-plugin" version="0.8">
         var a = "inline discourse plugin";
@@ -80,33 +79,24 @@ RSpec.describe ThemeField do
       <script src="/external-script.js"></script>
     HTML
 
-    theme_field = ThemeField.create!(theme_id: 1, target_id: 0, name: "header", value: html)
+    theme_field = ThemeField.create!(theme_id: -1, target_id: 0, name: "header", value: html)
     theme_field.ensure_baked!
-    expect(theme_field.value_baked).to include(
-      "<script defer=\"\" src=\"#{theme_field.javascript_cache.url}\" data-theme-id=\"1\" nonce=\"#{ThemeField::CSP_NONCE_PLACEHOLDER}\"></script>",
+
+    baked_doc = Nokogiri::HTML5.fragment(theme_field.value_baked)
+
+    extracted_scripts = baked_doc.css("script[src^='/theme-javascripts/']")
+    expect(extracted_scripts.length).to eq(4)
+
+    expect(theme_field.javascript_cache.content).to include("inline discourse plugin")
+
+    raw_js_cache_contents = theme_field.raw_javascript_caches.map(&:content)
+    expect(raw_js_cache_contents).to contain_exactly(
+      'var b = "inline raw script";',
+      'var c = "text/javascript";',
+      'var d = "application/javascript";',
     )
-    expect(theme_field.value_baked).to include("external-script.js")
-    expect(theme_field.value_baked).to include('<script type="text/template"')
-    expect(theme_field.javascript_cache.content).to include('a = "inline discourse plugin"')
-    expect(theme_field.javascript_cache.content).to include('b = "inline raw script"')
-    expect(theme_field.javascript_cache.content).to include('c = "text/javascript"')
-    expect(theme_field.javascript_cache.content).to include('d = "application/javascript"')
-  end
 
-  it "adds newlines between the extracted javascripts" do
-    html = <<~HTML
-      <script>var a = 10</script>
-      <script>var b = 10</script>
-    HTML
-
-    extracted = <<~JS
-      var a = 10
-      var b = 10
-    JS
-
-    theme_field = ThemeField.create!(theme_id: 1, target_id: 0, name: "header", value: html)
-    theme_field.ensure_baked!
-    expect(theme_field.javascript_cache.content).to include(extracted)
+    expect(baked_doc.css("script[type='text/template']").length).to eq(1)
   end
 
   it "correctly extracts and generates errors for transpiled js" do
@@ -116,13 +106,36 @@ RSpec.describe ThemeField do
 </script>
 HTML
 
-    field = ThemeField.create!(theme_id: 1, target_id: 0, name: "header", value: html)
+    field = ThemeField.create!(theme_id: -1, target_id: 0, name: "header", value: html)
     field.ensure_baked!
+    expect(field.error).to eq(nil)
+    expect(field.value_baked).to include(
+      "<script defer=\"\" src=\"#{field.javascript_cache.url}\" data-theme-id=\"-1\" nonce=\"#{ThemeField::CSP_NONCE_PLACEHOLDER}\"></script>",
+    )
+    expect(field.javascript_cache.content).to include("[THEME -1 'Foundation'] Compile error")
+
+    field.update!(value: "")
+    field.ensure_baked!
+    expect(field.error).to eq(nil)
+  end
+
+  it "correctly extracts and generates errors for raw transpiled js" do
+    html = <<~HTML
+      <script>
+        badJavaScript(;
+      </script>
+    HTML
+
+    field = ThemeField.create!(theme_id: -1, target_id: 0, name: "header", value: html)
+    field.ensure_baked!
+
     expect(field.error).not_to eq(nil)
     expect(field.value_baked).to include(
-      "<script defer=\"\" src=\"#{field.javascript_cache.url}\" data-theme-id=\"1\" nonce=\"#{ThemeField::CSP_NONCE_PLACEHOLDER}\"></script>",
+      "<script defer=\"\" src=\"#{field.raw_javascript_caches[0].url}\" data-theme-id=\"-1\" nonce=\"#{ThemeField::CSP_NONCE_PLACEHOLDER}\"></script>",
     )
-    expect(field.javascript_cache.content).to include("[THEME 1 'Default'] Compile error")
+    expect(field.raw_javascript_caches[0].content).to include(
+      "[THEME -1 'Foundation'] Compile error",
+    )
 
     field.update!(value: "")
     field.ensure_baked!
@@ -137,17 +150,17 @@ HTML
 HTML
 
     ThemeField.create!(
-      theme_id: 1,
+      theme_id: -1,
       target_id: 3,
       name: "yaml",
       value: "string_setting: \"test text \\\" 123!\"",
     ).ensure_baked!
-    theme_field = ThemeField.create!(theme_id: 1, target_id: 0, name: "head_tag", value: html)
+    theme_field = ThemeField.create!(theme_id: -1, target_id: 0, name: "head_tag", value: html)
     theme_field.ensure_baked!
     javascript_cache = theme_field.javascript_cache
 
     expect(theme_field.value_baked).to include(
-      "<script defer=\"\" src=\"#{javascript_cache.url}\" data-theme-id=\"1\" nonce=\"#{ThemeField::CSP_NONCE_PLACEHOLDER}\"></script>",
+      "<script defer=\"\" src=\"#{javascript_cache.url}\" data-theme-id=\"-1\" nonce=\"#{ThemeField::CSP_NONCE_PLACEHOLDER}\"></script>",
     )
     expect(javascript_cache.content).to include("testing-div")
     expect(javascript_cache.content).to include("string_setting")
@@ -159,19 +172,25 @@ HTML
 
   it "correctly generates errors for transpiled css" do
     css = "body {"
-    field = ThemeField.create!(theme_id: 1, target_id: 0, name: "scss", value: css)
-    field.ensure_baked!
-    expect(field.error).not_to eq(nil)
+    field = theme.set_field(target: :common, name: :scss, value: css)
+    theme.save!
+    expect(field.reload.error).to include('Error: expected "}"')
 
-    field.value = "@import 'missingfile';"
-    field.save!
-    field.ensure_baked!
-    expect(field.error).to include("Error: Can't find stylesheet to import.")
+    theme.set_field(target: :common, name: :scss, value: <<~SCSS)
+      body {
+        color: unquote("https://example.com/this-is-a-mistake");
+      }
+    SCSS
+    theme.save!
+    expect(field.reload.error).to include("Missed semicolon")
 
-    field.value = "body {color: blue};"
-    field.save!
-    field.ensure_baked!
-    expect(field.error).to eq(nil)
+    theme.set_field(target: :common, name: :scss, value: "@import 'missingfile';")
+    theme.save!
+    expect(field.reload.error).to include("Error: Can't find stylesheet to import.")
+
+    theme.set_field(target: :common, name: :scss, value: "body {color: blue};")
+    theme.save!
+    expect(field.reload.error).to eq(nil)
   end
 
   it "allows importing scss files" do
@@ -229,12 +248,6 @@ HTML
         name: "discourse/templates/discovery.hbs",
         value: "{{hello-world}}",
       )
-    raw_hbs_field =
-      theme.set_field(
-        target: :extra_js,
-        name: "discourse/templates/discovery.hbr",
-        value: "{{hello-world}}",
-      )
     hbr_field =
       theme.set_field(
         target: :extra_js,
@@ -258,7 +271,6 @@ HTML
     expect(theme.javascript_cache.content).to include(
       "define(\"discourse/theme-#{theme.id}/discourse/templates/discovery\", [\"exports\", ",
     )
-    expect(theme.javascript_cache.content).to include('addRawTemplate("discovery"')
     expect(theme.javascript_cache.content).to include(
       "define(\"discourse/theme-#{theme.id}/discourse/controllers/discovery\"",
     )
@@ -268,6 +280,9 @@ HTML
     expect(theme.javascript_cache.content).to include("const settings =")
     expect(theme.javascript_cache.content).to include(
       "[THEME #{theme.id} '#{theme.name}'] Compile error: unknown file extension 'blah' (discourse/controllers/discovery.blah)",
+    )
+    expect(theme.javascript_cache.content).to include(
+      "[THEME #{theme.id} '#{theme.name}'] Compile error: unknown file extension 'hbr' (discourse/templates/other_discovery.hbr)",
     )
 
     # Check sourcemap
@@ -284,8 +299,8 @@ HTML
       "discourse/controllers/discovery.blah",
       "discourse/controllers/discovery.js",
       "discourse/templates/discovery.js",
-      "discovery.js",
-      "other_discovery.js",
+      "discourse/templates/other_discovery.hbr",
+      "settings.js",
     )
     expect(map["sourceRoot"]).to eq("theme-#{theme.id}/")
     expect(map["sourcesContent"].length).to eq(6)
@@ -294,7 +309,7 @@ HTML
   def create_upload_theme_field!(name)
     ThemeField
       .create!(
-        theme_id: 1,
+        theme_id: -1,
         target_id: 0,
         value: "",
         type_id: ThemeField.types[:theme_upload_var],
@@ -315,7 +330,7 @@ HTML
   def create_yaml_field(value)
     field =
       ThemeField.create!(
-        theme_id: 1,
+        theme_id: -1,
         target_id: Theme.targets[:settings],
         name: "yaml",
         value: value,
@@ -409,6 +424,14 @@ HTML
         name: "string_default_out_of_range",
         error_messages: [I18n.t("#{key}.string_value_not_valid_min", min: 20)].join(" "),
       ),
+    )
+  end
+
+  it "generates the right errors when setting of type objects have default values which does not matches the schema" do
+    field = create_yaml_field(get_fixture("invalid"))
+
+    expect(field.error).to include(
+      "Setting `invalid_default_objects_setting` default value isn't valid. The property at JSON Pointer '/0/required_string' must be present. The property at JSON Pointer '/1/min_5_chars_string' must be at least 5 characters long. The property at JSON Pointer '/1/children/0/required_integer' must be present.",
     )
   end
 
@@ -604,7 +627,7 @@ HTML
       it "is generated correctly" do
         fr1.ensure_baked!
         expect(fr1.value_baked).to include(
-          "<script defer src=\"#{fr1.javascript_cache.url}\" data-theme-id=\"#{fr1.theme_id}\" nonce=\"#{ThemeField::CSP_NONCE_PLACEHOLDER}\"></script>",
+          "<script type=\"module\" src=\"#{fr1.javascript_cache.url}\" data-theme-id=\"#{fr1.theme_id}\" nonce=\"#{ThemeField::CSP_NONCE_PLACEHOLDER}\"></script>",
         )
         expect(fr1.javascript_cache.content).to include("bonjourworld")
         expect(fr1.javascript_cache.content).to include("helloworld")
@@ -789,7 +812,7 @@ HTML
         theme.set_field(
           target: :common,
           name: "head_tag",
-          value: "<script>let c = 'd';</script>",
+          value: "<script type='text/discourse-plugin' version='0.1'>let c = 'd';</script>",
           type: :html,
         )
 

@@ -17,14 +17,14 @@ class AnonymousShadowCreator
 
   def get_master
     return unless user
-    return unless SiteSetting.allow_anonymous_posting
+    return unless SiteSetting.allow_anonymous_mode
 
     user.master_user
   end
 
   def get
     return unless user
-    return unless SiteSetting.allow_anonymous_posting
+    return unless SiteSetting.allow_anonymous_mode
     return if !user.in_any_groups?(SiteSetting.anonymous_posting_allowed_groups_map)
     return if SiteSetting.must_approve_users? && !user.approved?
 
@@ -79,7 +79,7 @@ class AnonymousShadowCreator
 
   def resolve_username
     username = I18n.t("anonymous").downcase
-    username = "anonymous" unless UserNameSuggester.sanitize_username(username).present?
+    username = "anonymous" if UserNameSuggester.sanitize_username(username).blank?
 
     UserNameSuggester.suggest(username)
   end

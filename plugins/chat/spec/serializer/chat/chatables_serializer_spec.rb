@@ -1,10 +1,8 @@
 # frozen_string_literal: true
 
-require "rails_helper"
-
 describe Chat::ChatablesSerializer do
   context "with status" do
-    fab!(:user_1) { Fabricate(:user) }
+    fab!(:user_1, :user)
 
     before do
       SiteSetting.enable_user_status = true
@@ -23,7 +21,7 @@ describe Chat::ChatablesSerializer do
     end
 
     context "with hidden profile" do
-      before { user_1.user_option.update!(hide_profile_and_presence: true) }
+      before { user_1.user_option.update!(hide_profile: true) }
 
       it "doesn’t include status" do
         serializer =

@@ -1,16 +1,36 @@
+import { hbs } from "ember-cli-htmlbars";
 import $ from "jquery";
 import { h } from "virtual-dom";
 import { addWidgetCleanCallback } from "discourse/components/mount-widget";
+import discourseDebounce from "discourse/lib/debounce";
+import { registerDeprecationHandler } from "discourse/lib/deprecated";
+import { iconNode } from "discourse/lib/icon-library";
 import { Placeholder } from "discourse/lib/posts-with-placeholders";
+import { consolePrefix } from "discourse/lib/source-identifier";
 import transformPost from "discourse/lib/transform-post";
 import DiscourseURL from "discourse/lib/url";
 import { avatarFor } from "discourse/widgets/post";
-import { createWidget } from "discourse/widgets/widget";
-import discourseDebounce from "discourse-common/lib/debounce";
-import { iconNode } from "discourse-common/lib/icon-library";
-import I18n from "discourse-i18n";
+import RenderGlimmer from "discourse/widgets/render-glimmer";
+import {
+  createWidget,
+  POST_STREAM_DEPRECATION_OPTIONS,
+} from "discourse/widgets/widget";
+import { i18n } from "discourse-i18n";
+
+export let havePostStreamWidgetExtensions = null;
+
+registerDeprecationHandler((_, opts) => {
+  if (opts?.id === POST_STREAM_DEPRECATION_OPTIONS.id) {
+    if (!havePostStreamWidgetExtensions) {
+      havePostStreamWidgetExtensions = new Set();
+    }
+
+    havePostStreamWidgetExtensions.add(consolePrefix().slice(1, -1));
+  }
+});
 
 let transformCallbacks = null;
+
 export function postTransformCallbacks(transformed) {
   if (transformCallbacks === null) {
     return;
@@ -20,6 +40,7 @@ export function postTransformCallbacks(transformed) {
     transformCallbacks[i].call(this, transformed);
   }
 }
+
 export function addPostTransformCallback(callback) {
   transformCallbacks = transformCallbacks || [];
   transformCallbacks.push(callback);
@@ -67,6 +88,7 @@ addWidgetCleanCallback("post-stream", () => {
   _heights = {};
 });
 
+// glimmer-post-stream: has glimmer version
 createWidget("posts-filtered-notice", {
   buildKey: (attrs) => `posts-filtered-notice-${attrs.id}`,
 
@@ -81,7 +103,7 @@ createWidget("posts-filtered-notice", {
       return [
         h(
           "span.filtered-replies-viewing",
-          I18n.t("post.filtered_replies.viewing_subset")
+          i18n("post.filtered_replies.viewing_subset")
         ),
         this.attach("filter-show-all", attrs),
       ];
@@ -94,7 +116,7 @@ createWidget("posts-filtered-notice", {
       return [
         h(
           "span.filtered-replies-viewing",
-          I18n.t("post.filtered_replies_viewing", {
+          i18n("post.filtered_replies_viewing", {
             count: sourcePost.reply_count,
           })
         ),
@@ -118,7 +140,7 @@ createWidget("posts-filtered-notice", {
       return [
         h(
           "span.filtered-replies-viewing",
-          I18n.t("post.filtered_replies.viewing_summary")
+          i18n("post.filtered_replies.viewing_summary")
         ),
         this.attach("filter-show-all", attrs),
       ];
@@ -128,7 +150,7 @@ createWidget("posts-filtered-notice", {
       return [
         h(
           "span.filtered-replies-viewing",
-          I18n.t("post.filtered_replies.viewing_posts_by", {
+          i18n("post.filtered_replies.viewing_posts_by", {
             post_count: userPostsCount,
           })
         ),
@@ -149,12 +171,13 @@ createWidget("posts-filtered-notice", {
   },
 });
 
+// glimmer-post-stream: has glimmer version
 createWidget("filter-jump-to-post", {
   tagName: "a.filtered-jump-to-post",
   buildKey: (attrs) => `jump-to-post-${attrs.id}`,
 
   html(attrs) {
-    return I18n.t("post.filtered_replies.post_number", {
+    return i18n("post.filtered_replies.post_number", {
       username: attrs.username,
       post_number: attrs.postNumber,
     });
@@ -165,6 +188,7 @@ createWidget("filter-jump-to-post", {
   },
 });
 
+// glimmer-post-stream: has glimmer version
 createWidget("filter-show-all", {
   tagName: "button.filtered-replies-show-all",
   buildKey: (attrs) => `filtered-show-all-${attrs.id}`,
@@ -174,7 +198,7 @@ createWidget("filter-show-all", {
   },
 
   html() {
-    return [iconNode("arrows-alt-v"), I18n.t("post.filtered_replies.show_all")];
+    return [iconNode("up-down"), i18n("post.filtered_replies.show_all")];
   },
 
   click() {
@@ -187,7 +211,7 @@ createWidget("filter-show-all", {
 });
 
 export default createWidget("post-stream", {
-  tagName: "div.post-stream",
+  tagName: "div.post-stream.widget-post-stream",
 
   html(attrs) {
     const posts = attrs.posts || [];
@@ -221,6 +245,8 @@ export default createWidget("post-stream", {
         nextPost
       );
       transformed.canCreatePost = attrs.canCreatePost;
+      transformed.prevPost = prevPost;
+      transformed.nextPost = nextPost;
       transformed.mobileView = mobileView;
 
       if (transformed.canManage || transformed.canSplitMergeTopic) {
@@ -252,7 +278,14 @@ export default createWidget("post-stream", {
       if (prevDate) {
         const daysSince = Math.floor((curTime - prevDate) / DAY);
         if (daysSince > this.siteSettings.show_time_gap_days) {
-          result.push(this.attach("time-gap", { daysSince }));
+          result.push(
+            new RenderGlimmer(
+              this,
+              "div.time-gap",
+              hbs`<Post::TimeGap @daysSince={{@data.daysSince}} />`,
+              { daysSince }
+            )
+          );
         }
       }
       prevDate = curTime;

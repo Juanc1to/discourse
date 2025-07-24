@@ -4,14 +4,14 @@
 # for the body and subject
 module Email
   class MessageBuilder
-    attr_reader :template_args
+    attr_reader :template_args, :reply_by_email_key
 
     ALLOW_REPLY_BY_EMAIL_HEADER = "X-Discourse-Allow-Reply-By-Email"
+    INSTRUCTIONS_SEPARATOR = "---\n"
 
     def initialize(to, opts = nil)
       @to = to
       @opts = opts || {}
-
       @template_args = {
         site_name: SiteSetting.title,
         email_prefix: SiteSetting.email_prefix.presence || SiteSetting.title,
@@ -20,47 +20,82 @@ module Email
         hostname: Discourse.current_hostname,
       }.merge!(@opts)
 
-      if @template_args[:url].present?
-        @template_args[:header_instructions] ||= I18n.t(
-          "user_notifications.header_instructions",
-          @template_args,
+      return if @template_args[:url].blank?
+
+      @template_args[:header_instructions] ||= I18n.t(
+        "user_notifications.header_instructions",
+        @template_args,
+      )
+      @visit_link_to_respond_key =
+        DiscoursePluginRegistry.apply_modifier(
+          :message_builder_visit_link_to_respond,
+          "user_notifications.visit_link_to_respond",
+          @opts,
+          @to,
+        )
+      @reply_by_email_key =
+        DiscoursePluginRegistry.apply_modifier(
+          :message_builder_reply_by_email,
+          "user_notifications.reply_by_email",
+          @opts,
+          @to,
         )
 
-        if @opts[:include_respond_instructions] == false
-          @template_args[:respond_instructions] = ""
+      if @opts[:include_respond_instructions] == false
+        if @opts[:private_reply]
           @template_args[:respond_instructions] = I18n.t(
             "user_notifications.pm_participants",
             @template_args,
-          ) if @opts[:private_reply]
+          )
         else
-          if @opts[:only_reply_by_email]
-            string = +"user_notifications.only_reply_by_email"
-            string << "_pm" if @opts[:private_reply]
-          else
-            string =
-              (
-                if allow_reply_by_email?
-                  +"user_notifications.reply_by_email"
-                else
-                  +"user_notifications.visit_link_to_respond"
-                end
-              )
-            string << "_pm" if @opts[:private_reply]
-          end
-          @template_args[:respond_instructions] = "---\n" + I18n.t(string, @template_args)
+          @template_args[:respond_instructions] = ""
         end
-
-        if @opts[:add_unsubscribe_link]
-          unsubscribe_string =
-            if @opts[:mailing_list_mode]
-              "unsubscribe_mailing_list"
-            elsif SiteSetting.unsubscribe_via_email_footer
-              "unsubscribe_link_and_mail"
+      else
+        if @opts[:only_reply_by_email]
+          respond_instructions_key = +"user_notifications.only_reply_by_email"
+          if @opts[:private_reply]
+            if @opts[:username] == Discourse.system_user.username
+              respond_instructions_key << "_pm_button_only"
             else
-              "unsubscribe_link"
+              respond_instructions_key << "_pm"
             end
-          @template_args[:unsubscribe_instructions] = I18n.t(unsubscribe_string, @template_args)
+          end
+        else
+          respond_instructions_key =
+            (
+              if allow_reply_by_email?
+                +@reply_by_email_key
+              else
+                +@visit_link_to_respond_key
+              end
+            )
+          if @opts[:private_reply]
+            if @opts[:username] == Discourse.system_user.username
+              respond_instructions_key << "_pm_button_only"
+            else
+              respond_instructions_key << "_pm"
+            end
+          end
         end
+        @template_args[:respond_instructions] = (
+          if respond_instructions_key != ""
+            INSTRUCTIONS_SEPARATOR + I18n.t(respond_instructions_key, @template_args)
+          else
+            ""
+          end
+        )
+      end
+
+      if @opts[:add_unsubscribe_link]
+        unsubscribe_string =
+          if @opts[:mailing_list_mode]
+            "unsubscribe_mailing_list"
+          elsif SiteSetting.unsubscribe_via_email_footer
+            "unsubscribe_link_and_mail"
+          else
+            "unsubscribe_link"
+          end
+        @template_args[:unsubscribe_instructions] = I18n.t(unsubscribe_string, @template_args)
       end
     end
 
@@ -126,7 +161,7 @@ module Email
       else
         subject = @opts[:subject]
       end
-      subject
+      DiscoursePluginRegistry.apply_modifier(:message_builder_subject, subject, @opts, @to)
     end
 
     def html_part
@@ -164,6 +199,7 @@ module Email
             html_body: html_override.html_safe,
           },
         )
+      html = DiscoursePluginRegistry.apply_modifier(:message_builder_html_part, html, @opts, @to)
 
       Mail::Part.new do
         content_type "text/html; charset=UTF-8"
@@ -175,6 +211,14 @@ module Email
       body = nil
 
       if @opts[:template]
+        template_args_to_escape = %i[topic_title inviter_name]
+
+        template_args_to_escape.each do |key|
+          next if !@template_args.key?(key)
+
+          @template_args[key] = escaped_template_arg(key)
+        end
+
         body = I18n.t("#{@opts[:template]}.text_body_template", template_args).dup
       else
         body = @opts[:body].dup
@@ -184,8 +228,7 @@ module Email
         body << "\n"
         body << @template_args[:unsubscribe_instructions]
       end
-
-      body
+      DiscoursePluginRegistry.apply_modifier(:message_builder_body, body, @opts, @to)
     end
 
     def build_args
@@ -211,16 +254,22 @@ module Email
 
     def header_args
       result = {}
+
       if @opts[:add_unsubscribe_link]
-        unsubscribe_url =
-          @template_args[:unsubscribe_url].presence || @template_args[:user_preferences_url]
-        result["List-Unsubscribe"] = "<#{unsubscribe_url}>"
+        if unsubscribe_url = @template_args[:unsubscribe_url].presence
+          result["List-Unsubscribe"] = "<#{unsubscribe_url}>"
+          result["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click"
+        else
+          result["List-Unsubscribe"] = "<#{@template_args[:user_preferences_url]}>"
+        end
       end
 
       result["X-Discourse-Post-Id"] = @opts[:post_id].to_s if @opts[:post_id]
+      result["X-Discourse-Post-Ids"] = @opts[:post_ids].join(",") if @opts[:post_ids].present?
       result["X-Discourse-Topic-Id"] = @opts[:topic_id].to_s if @opts[:topic_id]
+      result["X-Discourse-Topic-Ids"] = @opts[:topic_ids].join(",") if @opts[:topic_ids].present?
 
-      # at this point these have been filtered by the recipient's guardian for visibility,
+      # At this point these have been filtered by the recipient's guardian for visibility,
       # see UserNotifications#send_notification_email
       result["X-Discourse-Tags"] = @template_args[:show_tags_in_subject] if @opts[
         :show_tags_in_subject
@@ -229,7 +278,11 @@ module Email
         :show_category_in_subject
       ]
 
-      # please, don't send us automatic responses...
+      # Mimics X-GitHub-Sender, which identifies the GitHub user that originated the message,
+      # useful to filter and prioritize mail.
+      result["X-Discourse-Sender"] = @opts[:username] if @opts[:username].present?
+
+      # Please, don't send us automatic responses...
       result["X-Auto-Response-Suppress"] = "All"
 
       if !allow_reply_by_email?
@@ -288,7 +341,7 @@ module Email
 
     def reply_by_email_address
       return @reply_by_email_address if @reply_by_email_address
-      return nil unless SiteSetting.reply_by_email_address.present?
+      return nil if SiteSetting.reply_by_email_address.blank?
 
       @reply_by_email_address = SiteSetting.reply_by_email_address.dup
 
@@ -318,6 +371,15 @@ module Email
     def site_alias_email(source)
       from_alias = Email.site_title
       %Q|"#{Email.cleanup_alias(from_alias)}" <#{source}>|
+    end
+
+    private
+
+    def escaped_template_arg(key)
+      value = template_args[key].dup
+      # explicitly escaped twice, as Mailers will mark the body as html_safe
+      once_escaped = String.new(ERB::Util.html_escape(value))
+      ERB::Util.html_escape(once_escaped)
     end
   end
 end

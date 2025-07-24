@@ -1,20 +1,23 @@
 import { tracked } from "@glimmer/tracking";
-import { getOwner, setOwner } from "@ember/application";
 import { action } from "@ember/object";
-import { inject as service } from "@ember/service";
+import { getOwner, setOwner } from "@ember/owner";
+import { service } from "@ember/service";
+import { isSkinTonableEmoji } from "pretty-text/emoji";
+import EmojiPickerDetached from "discourse/components/emoji-picker/detached";
 import BookmarkModal from "discourse/components/modal/bookmark";
 import FlagModal from "discourse/components/modal/flag";
 import { popupAjaxError } from "discourse/lib/ajax-error";
-import { BookmarkFormData } from "discourse/lib/bookmark";
+import { BookmarkFormData } from "discourse/lib/bookmark-form-data";
+import { bind } from "discourse/lib/decorators";
+import getURL from "discourse/lib/get-url";
 import { clipboardCopy } from "discourse/lib/utilities";
 import Bookmark from "discourse/models/bookmark";
-import getURL from "discourse-common/lib/get-url";
-import { bind } from "discourse-common/utils/decorators";
-import I18n from "discourse-i18n";
+import { DEFAULT_DIVERSITY } from "discourse/services/emoji-store";
+import { i18n } from "discourse-i18n";
 import { MESSAGE_CONTEXT_THREAD } from "discourse/plugins/chat/discourse/components/chat-message";
 import ChatMessageFlag from "discourse/plugins/chat/discourse/lib/chat-message-flag";
 import ChatMessage from "discourse/plugins/chat/discourse/models/chat-message";
-import ChatMessageReaction, {
+import ChatMessageReactionModel, {
   REACTIONS,
 } from "discourse/plugins/chat/discourse/models/chat-message-reaction";
 
@@ -28,12 +31,10 @@ export function resetRemovedChatComposerSecondaryActions() {
   removedSecondaryActions.clear();
 }
 
-export default class ChatMessageInteractor {
+export default class ChatemojiReactions {
   @service appEvents;
   @service dialog;
   @service chat;
-  @service chatEmojiReactionStore;
-  @service chatEmojiPickerManager;
   @service chatChannelComposer;
   @service chatThreadComposer;
   @service chatChannelPane;
@@ -44,41 +45,67 @@ export default class ChatMessageInteractor {
   @service router;
   @service modal;
   @service capabilities;
+  @service siteSettings;
+  @service menu;
   @service toasts;
+  @service interactedChatMessage;
+  @service emojiStore;
 
   @tracked message = null;
   @tracked context = null;
-
-  cachedFavoritesReactions = null;
 
   constructor(owner, message, context) {
     setOwner(this, owner);
 
     this.message = message;
     this.context = context;
-    this.cachedFavoritesReactions = this.chatEmojiReactionStore.favorites;
+  }
+
+  get emojiReactions() {
+    const userQuickReactionsCustom = (
+      (this.currentUser.user_option.chat_quick_reaction_type === "custom" &&
+        this.currentUser.user_option.chat_quick_reactions_custom) ||
+      ""
+    )
+      .split("|")
+      .filter(Boolean);
+
+    const frequentReactions = this.emojiStore.favoritesForContext("chat");
+
+    const defaultReactions = this.siteSettings.default_emoji_reactions
+      .split("|")
+      .map((emoji) => {
+        if (
+          this.emojiStore.diversity !== DEFAULT_DIVERSITY &&
+          isSkinTonableEmoji(emoji)
+        ) {
+          return `${emoji}:t${this.emojiStore.diversity}`;
+        }
+
+        return emoji;
+      });
+
+    const allReactionsInOrder = userQuickReactionsCustom
+      .concat(frequentReactions)
+      .concat(defaultReactions);
+
+    return allReactionsInOrder
+      .filter((item, index) => {
+        return allReactionsInOrder.indexOf(item) === index;
+      })
+      .filter(Boolean)
+      .slice(0, 3)
+      .map(
+        (emoji) =>
+          this.message.reactions.find((reaction) => reaction.emoji === emoji) ||
+          ChatMessageReactionModel.create({ emoji })
+      );
   }
 
   get pane() {
     return this.context === MESSAGE_CONTEXT_THREAD
       ? this.chatThreadPane
       : this.chatChannelPane;
-  }
-
-  get emojiReactions() {
-    let favorites = this.cachedFavoritesReactions;
-
-    // may be a {} if no defaults defined in some production builds
-    if (!favorites || !favorites.slice) {
-      return [];
-    }
-
-    return favorites.slice(0, 3).map((emoji) => {
-      return (
-        this.message.reactions.find((reaction) => reaction.emoji === emoji) ||
-        ChatMessageReaction.create({ emoji })
-      );
-    });
   }
 
   get canEdit() {
@@ -162,14 +189,14 @@ export default class ChatMessageInteractor {
 
     buttons.push({
       id: "copyLink",
-      name: I18n.t("chat.copy_link"),
+      name: i18n("chat.copy_link"),
       icon: "link",
     });
 
     if (this.site.mobileView) {
       buttons.push({
         id: "copyText",
-        name: I18n.t("chat.copy_text"),
+        name: i18n("chat.copy_text"),
         icon: "clipboard",
       });
     }
@@ -177,23 +204,23 @@ export default class ChatMessageInteractor {
     if (this.canEdit) {
       buttons.push({
         id: "edit",
-        name: I18n.t("chat.edit"),
-        icon: "pencil-alt",
+        name: i18n("chat.edit"),
+        icon: "pencil",
       });
     }
 
     if (!this.pane.selectingMessages) {
       buttons.push({
         id: "select",
-        name: I18n.t("chat.select"),
-        icon: "tasks",
+        name: i18n("chat.select"),
+        icon: "list-check",
       });
     }
 
     if (this.canFlagMessage) {
       buttons.push({
         id: "flag",
-        name: I18n.t("chat.flag"),
+        name: i18n("chat.flag"),
         icon: "flag",
       });
     }
@@ -201,24 +228,24 @@ export default class ChatMessageInteractor {
     if (this.canDeleteMessage) {
       buttons.push({
         id: "delete",
-        name: I18n.t("chat.delete"),
-        icon: "trash-alt",
+        name: i18n("chat.delete"),
+        icon: "trash-can",
       });
     }
 
     if (this.canRestoreMessage) {
       buttons.push({
         id: "restore",
-        name: I18n.t("chat.restore"),
-        icon: "undo",
+        name: i18n("chat.restore"),
+        icon: "arrow-rotate-left",
       });
     }
 
     if (this.canRebakeMessage) {
       buttons.push({
         id: "rebake",
-        name: I18n.t("chat.rebake_message"),
-        icon: "sync-alt",
+        name: i18n("chat.rebake_message"),
+        icon: "rotate",
       });
     }
 
@@ -248,8 +275,8 @@ export default class ChatMessageInteractor {
   copyText() {
     clipboardCopy(this.message.message);
     this.toasts.success({
-      duration: 3000,
-      data: { message: I18n.t("chat.text_copied") },
+      duration: "short",
+      data: { message: i18n("chat.text_copied") },
     });
   }
 
@@ -268,8 +295,8 @@ export default class ChatMessageInteractor {
     url = url.indexOf("/") === 0 ? protocol + "//" + host + url : url;
     clipboardCopy(url);
     this.toasts.success({
-      duration: 1500,
-      data: { message: I18n.t("chat.link_copied") },
+      duration: "short",
+      data: { message: i18n("chat.link_copied") },
     });
   }
 
@@ -289,10 +316,6 @@ export default class ChatMessageInteractor {
 
     if (this.site.mobileView) {
       this.chat.activeMessage = null;
-    }
-
-    if (reactAction === REACTIONS.add) {
-      this.chatEmojiReactionStore.track(`:${emoji}:`);
     }
 
     this.pane.reacting = true;
@@ -327,6 +350,13 @@ export default class ChatMessageInteractor {
 
   @action
   toggleBookmark() {
+    // somehow, this works around a low-level chrome rendering issue which
+    // causes a complete browser crash when saving/deleting bookmarks in chat.
+    // Error message: "Check failed: !NeedsToUpdateCachedValues()."
+    // Internal topic: t/143485
+    // Hopefully, this can be dropped in future chrome versions
+    document.activeElement?.blur();
+
     this.modal.show(BookmarkModal, {
       model: {
         bookmark: new BookmarkFormData(
@@ -337,12 +367,12 @@ export default class ChatMessageInteractor {
               this.message.id
             )
         ),
-        afterSave: (savedData) => {
-          const bookmark = Bookmark.create(savedData);
+        afterSave: (bookmarkFormData) => {
+          const bookmark = Bookmark.create(bookmarkFormData.saveData);
           this.message.bookmark = bookmark;
           this.appEvents.trigger(
             "bookmarks:changed",
-            savedData,
+            bookmarkFormData.saveData,
             bookmark.attachedTo()
           );
         },
@@ -399,13 +429,29 @@ export default class ChatMessageInteractor {
   }
 
   @action
-  openEmojiPicker(_, { target }) {
-    const pickerState = {
-      didSelectEmoji: this.selectReaction,
-      trigger: target,
-      context: "chat-channel-message",
-    };
-    this.chatEmojiPickerManager.open(pickerState);
+  async openEmojiPicker(trigger) {
+    this.interactedChatMessage.emojiPickerOpen = true;
+
+    await this.menu.show(trigger, {
+      identifier: "emoji-picker",
+      groupIdentifier: "emoji-picker",
+      component: EmojiPickerDetached,
+      onClose: () => {
+        this.interactedChatMessage.emojiPickerOpen = false;
+      },
+      data: {
+        context: "chat",
+        didSelectEmoji: (emoji) => {
+          this.selectReaction(emoji);
+        },
+      },
+    });
+  }
+
+  @action
+  async closeEmojiPicker() {
+    await this.menu.close("emoji-picker");
+    this.interactedChatMessage.emojiPickerOpen = false;
   }
 
   @bind

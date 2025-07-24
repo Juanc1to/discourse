@@ -1,36 +1,38 @@
 // Subscribes to user events on the message bus
+import { setOwner } from "@ember/owner";
+import { service } from "@ember/service";
+import { bind } from "discourse/lib/decorators";
 import {
   alertChannel,
   disable as disableDesktopNotifications,
   init as initDesktopNotifications,
-  onNotification,
+  onNotification as onDesktopNotification,
 } from "discourse/lib/desktop-notifications";
+import { isTesting } from "discourse/lib/environment";
 import {
   isPushNotificationsEnabled,
   register as registerPushNotifications,
   unsubscribe as unsubscribePushNotifications,
 } from "discourse/lib/push-notifications";
+import { currentThemeId } from "discourse/lib/theme-selector";
 import Notification from "discourse/models/notification";
-import { isTesting } from "discourse-common/config/environment";
-import { bind } from "discourse-common/utils/decorators";
 
-export default {
-  after: "message-bus",
+class SubscribeUserNotificationsInit {
+  @service currentUser;
+  @service messageBus;
+  @service pmTopicTrackingState;
+  @service store;
+  @service appEvents;
+  @service siteSettings;
+  @service site;
+  @service router;
 
-  initialize(owner) {
-    this.currentUser = owner.lookup("service:current-user");
+  constructor(owner) {
+    setOwner(this, owner);
 
     if (!this.currentUser) {
       return;
     }
-
-    this.messageBus = owner.lookup("service:message-bus");
-    this.store = owner.lookup("service:store");
-    this.messageBus = owner.lookup("service:message-bus");
-    this.appEvents = owner.lookup("service:app-events");
-    this.siteSettings = owner.lookup("service:site-settings");
-    this.site = owner.lookup("service:site");
-    this.router = owner.lookup("service:router");
 
     this.reviewableCountsChannel = `/reviewable_counts/${this.currentUser.id}`;
 
@@ -52,7 +54,8 @@ export default {
 
     this.messageBus.subscribe(
       `/do-not-disturb/${this.currentUser.id}`,
-      this.onDoNotDisturb
+      this.onDoNotDisturb,
+      this.currentUser.do_not_disturb_channel_position
     );
 
     this.messageBus.subscribe(
@@ -65,10 +68,12 @@ export default {
 
     this.messageBus.subscribe("/client_settings", this.onClientSettings);
 
+    this.pmTopicTrackingState.startTracking();
+
     if (!isTesting()) {
       this.messageBus.subscribe(alertChannel(this.currentUser), this.onAlert);
 
-      initDesktopNotifications(this.messageBus, this.appEvents);
+      initDesktopNotifications(this.messageBus);
 
       if (isPushNotificationsEnabled(this.currentUser)) {
         disableDesktopNotifications();
@@ -81,7 +86,7 @@ export default {
         unsubscribePushNotifications(this.currentUser);
       }
     }
-  },
+  }
 
   teardown() {
     if (!this.currentUser) {
@@ -115,7 +120,7 @@ export default {
     this.messageBus.unsubscribe("/client_settings", this.onClientSettings);
 
     this.messageBus.unsubscribe(alertChannel(this.currentUser), this.onAlert);
-  },
+  }
 
   @bind
   onReviewableCounts(data) {
@@ -127,7 +132,7 @@ export default {
       "unseen_reviewable_count",
       data.unseen_reviewable_count
     );
-  },
+  }
 
   @bind
   onNotification(data) {
@@ -209,22 +214,22 @@ export default {
 
       stale.results.set("content", newNotifications);
     }
-  },
+  }
 
   @bind
   onUserDrafts(data) {
     this.currentUser.updateDraftProperties(data);
-  },
+  }
 
   @bind
   onDoNotDisturb(data) {
     this.currentUser.updateDoNotDisturbStatus(data.ends_at);
-  },
+  }
 
   @bind
   onUserStatus(data) {
     this.appEvents.trigger("user-status:changed", data);
-  },
+  }
 
   @bind
   onCategories(data) {
@@ -250,15 +255,41 @@ export default {
     (data.deleted_categories || []).forEach((id) =>
       this.site.removeCategory(id)
     );
-  },
+  }
 
   @bind
   onClientSettings(data) {
+    // Theme site setting changes for client settings should only affect users
+    // currently using the same theme.
+    if (data.scoped_to?.theme_id) {
+      if (currentThemeId() !== data.scoped_to.theme_id) {
+        return;
+      }
+    }
+
     this.siteSettings[data.name] = data.value;
-  },
+  }
 
   @bind
   onAlert(data) {
-    return onNotification(data, this.siteSettings, this.currentUser);
+    if (this.site.desktopView) {
+      return onDesktopNotification(
+        data,
+        this.siteSettings,
+        this.currentUser,
+        this.appEvents
+      );
+    }
+  }
+}
+
+export default {
+  after: "message-bus",
+  initialize(owner) {
+    this.instance = new SubscribeUserNotificationsInit(owner);
+  },
+  teardown() {
+    this.instance.teardown();
+    this.instance = null;
   },
 };

@@ -142,7 +142,7 @@ RSpec.describe Imap::Sync do
     end
 
     context "when the message id matches the receiver post id regex" do
-      let(:message_id) { "topic/999/324@test.localhost" }
+      let(:message_id) { "discourse/post/324@test.localhost" }
       it "does not duplicate incoming email" do
         incoming_email = Fabricate(:incoming_email, message_id: message_id)
 
@@ -373,7 +373,11 @@ RSpec.describe Imap::Sync do
         provider.stubs(:uids).with(to: 100).returns([100])
         provider.stubs(:uids).with(from: 101).returns([])
 
-        PostDestroyer.new(Discourse.system_user, incoming_100.post).destroy
+        PostDestroyer.new(
+          Discourse.system_user,
+          incoming_100.post,
+          context: "Automated testing",
+        ).destroy
         provider
           .stubs(:emails)
           .with([100], %w[UID FLAGS LABELS ENVELOPE], anything)

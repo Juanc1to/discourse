@@ -1,10 +1,16 @@
-import { getOwner } from "@ember/application";
+import { getOwner } from "@ember/owner";
+import { hbs } from "ember-cli-htmlbars";
 import { Promise } from "rsvp";
 import { h } from "virtual-dom";
 import ShareTopicModal from "discourse/components/modal/share-topic";
+import PostMetaDataLanguage from "discourse/components/post/meta-data/language";
 import { dateNode } from "discourse/helpers/node";
 import autoGroupFlairForUser from "discourse/lib/avatar-flair";
+import { avatarUrl, translateSize } from "discourse/lib/avatar-utils";
+import { isTesting } from "discourse/lib/environment";
 import { relativeAgeMediumSpan } from "discourse/lib/formatter";
+import getURL, { getAbsoluteURL, getURLWithCDN } from "discourse/lib/get-url";
+import { iconNode } from "discourse/lib/icon-library";
 import postActionFeedback from "discourse/lib/post-action-feedback";
 import { nativeShare } from "discourse/lib/pwa-utils";
 import {
@@ -13,25 +19,29 @@ import {
 } from "discourse/lib/settings";
 import { transformBasicPost } from "discourse/lib/transform-post";
 import DiscourseURL from "discourse/lib/url";
-import { clipboardCopy, formatUsername } from "discourse/lib/utilities";
+import {
+  clipboardCopy,
+  escapeExpression,
+  formatUsername,
+} from "discourse/lib/utilities";
 import DecoratorHelper from "discourse/widgets/decorator-helper";
-import hbs from "discourse/widgets/hbs-compiler";
+import widgetHbs from "discourse/widgets/hbs-compiler";
 import PostCooked from "discourse/widgets/post-cooked";
 import { postTransformCallbacks } from "discourse/widgets/post-stream";
 import RawHtml from "discourse/widgets/raw-html";
+import RenderGlimmer, {
+  registerWidgetShim,
+} from "discourse/widgets/render-glimmer";
 import { applyDecorators, createWidget } from "discourse/widgets/widget";
-import { isTesting } from "discourse-common/config/environment";
-import { avatarUrl, translateSize } from "discourse-common/lib/avatar-utils";
-import getURL, {
-  getAbsoluteURL,
-  getURLWithCDN,
-} from "discourse-common/lib/get-url";
-import { iconNode } from "discourse-common/lib/icon-library";
-import I18n from "discourse-i18n";
+import { i18n } from "discourse-i18n";
 
-function transformWithCallbacks(post) {
+function transformWithCallbacks(post, topicUrl, store) {
   let transformed = transformBasicPost(post);
   postTransformCallbacks(transformed);
+
+  transformed.customShare = `${topicUrl}/${post.post_number}`;
+  transformed.asPost = store.createRecord("post", post);
+
   return transformed;
 }
 
@@ -51,7 +61,7 @@ export function avatarImg(wanted, attrs) {
 
   let alt = "";
   if (attrs.alt) {
-    alt = I18n.t(attrs.alt);
+    alt = i18n(attrs.alt);
   }
 
   let className =
@@ -74,6 +84,7 @@ export function avatarImg(wanted, attrs) {
   return h("img", properties);
 }
 
+// glimmer-post-stream: has glimmer version
 export function avatarFor(wanted, attrs, linkAttrs) {
   const attributes = {
     href: attrs.url,
@@ -84,7 +95,7 @@ export function avatarFor(wanted, attrs, linkAttrs) {
   // making them redundant for screen readers
   // so we hide the avatar from screen readers by default
   if (attrs.ariaHidden === false) {
-    attributes["aria-label"] = I18n.t("user.profile_possessive", {
+    attributes["aria-label"] = i18n("user.profile_possessive", {
       username: attrs.username,
     });
   } else {
@@ -104,6 +115,7 @@ export function avatarFor(wanted, attrs, linkAttrs) {
   );
 }
 
+// glimmer-post-stream: has glimmer version
 createWidget("select-post", {
   tagName: "div.select-posts",
 
@@ -147,6 +159,7 @@ createWidget("select-post", {
   },
 });
 
+// glimmer-post-stream: has glimmer version
 createWidget("reply-to-tab", {
   tagName: "a.reply-to-tab",
   buildKey: (attrs) => `reply-to-tab-${attrs.id}`,
@@ -157,14 +170,13 @@ createWidget("reply-to-tab", {
 
   buildAttributes(attrs) {
     let result = {
-      tabindex: "0",
+      href: "",
     };
 
-    if (!this.attrs.mobileView) {
+    if (!attrs.mobileView) {
+      result["role"] = "button";
       result["aria-controls"] = `embedded-posts__top--${attrs.post_number}`;
-      result["aria-expanded"] = this.attrs.repliesAbove.length
-        ? "true"
-        : "false";
+      result["aria-expanded"] = (attrs.repliesAbove.length > 0).toString();
     }
 
     return result;
@@ -189,7 +201,8 @@ createWidget("reply-to-tab", {
     ];
   },
 
-  click() {
+  click(event) {
+    event.preventDefault();
     this.state.loading = true;
     this.sendWidgetAction("toggleReplyAbove").then(
       () => (this.state.loading = false)
@@ -218,7 +231,7 @@ createWidget("post-avatar", {
     let hideFromAnonUser =
       this.siteSettings.hide_user_profiles_from_public && !this.currentUser;
     if (!attrs.user_id) {
-      body = iconNode("far-trash-alt", { class: "deleted-user-avatar" });
+      body = iconNode("trash-can", { class: "deleted-user-avatar" });
     } else {
       body = avatarFor.call(
         this,
@@ -261,19 +274,21 @@ createWidget("post-avatar", {
   },
 });
 
+// glimmer-post-stream: has glimmer version
 createWidget("post-locked-indicator", {
   tagName: "div.post-info.post-locked",
-  template: hbs`{{d-icon "lock"}}`,
-  title: () => I18n.t("post.locked"),
+  template: widgetHbs`{{d-icon "lock"}}`,
+  title: () => i18n("post.locked"),
 });
 
+// glimmer-post-stream: has glimmer version
 createWidget("post-email-indicator", {
   tagName: "div.post-info.via-email",
 
   title(attrs) {
     return attrs.isAutoGenerated
-      ? I18n.t("post.via_auto_generated_email")
-      : I18n.t("post.via_email");
+      ? i18n("post.via_auto_generated_email")
+      : i18n("post.via_email");
   },
 
   buildClasses(attrs) {
@@ -300,6 +315,7 @@ function showReplyTab(attrs, siteSettings) {
   );
 }
 
+// glimmer-post-stream: has glimmer version
 createWidget("post-meta-data", {
   tagName: "div.topic-meta-data",
 
@@ -322,11 +338,11 @@ createWidget("post-meta-data", {
       let title = "";
 
       if (groups?.length > 0) {
-        title = I18n.t("post.whisper_groups", {
+        title = i18n("post.whisper_groups", {
           groupNames: groups.join(", "),
         });
       } else {
-        title = I18n.t("post.whisper");
+        title = i18n("post.whisper");
       }
 
       postInfo.push(
@@ -360,6 +376,10 @@ createWidget("post-meta-data", {
       postInfo.push(this.attach("reply-to-tab", attrs));
     }
 
+    if (attrs.language && attrs.is_localized) {
+      postInfo.push(this.attach("post-language", attrs));
+    }
+
     postInfo.push(this.attach("post-date", attrs));
 
     postInfo.push(
@@ -368,7 +388,7 @@ createWidget("post-meta-data", {
         {
           className: attrs.read ? "read" : null,
           attributes: {
-            title: I18n.t("post.unread"),
+            title: i18n("post.unread"),
           },
         },
         iconNode("circle")
@@ -385,11 +405,12 @@ createWidget("post-meta-data", {
   },
 });
 
+// glimmer-post-stream: has glimmer version
 createWidget("expand-hidden", {
   tagName: "a.expand-hidden",
 
   html() {
-    return I18n.t("post.show_hidden");
+    return i18n("post.show_hidden");
   },
 
   click() {
@@ -397,6 +418,7 @@ createWidget("expand-hidden", {
   },
 });
 
+// glimmer-post-stream: has glimmer version
 createWidget("post-date", {
   tagName: "div.post-info.post-date",
 
@@ -431,6 +453,19 @@ createWidget("post-date", {
   },
 });
 
+// glimmer-post-stream: has glimmer version
+createWidget("post-language", {
+  html(attrs) {
+    return [
+      new RenderGlimmer(this, "div", PostMetaDataLanguage, {
+        language: attrs.language,
+        localization_outdated: attrs.localization_outdated,
+      }),
+    ];
+  },
+});
+
+// glimmer-post-stream: has glimmer version
 createWidget("expand-post-button", {
   tagName: "button.btn.expand-post",
   buildKey: (attrs) => `expand-post-button-${attrs.id}`,
@@ -441,9 +476,9 @@ createWidget("expand-post-button", {
 
   html(attrs, state) {
     if (state.loadingExpanded) {
-      return I18n.t("loading");
+      return i18n("loading");
     } else {
-      return [I18n.t("post.show_full"), "..."];
+      return [i18n("post.show_full"), "..."];
     }
   },
 
@@ -453,6 +488,7 @@ createWidget("expand-post-button", {
   },
 });
 
+// glimmer-post-stream: has glimmer version
 createWidget("post-group-request", {
   buildKey: (attrs) => `post-group-request-${attrs.id}`,
 
@@ -465,10 +501,11 @@ createWidget("post-group-request", {
       "/g/" + attrs.requestedGroupName + "/requests?filter=" + attrs.username
     );
 
-    return h("a", { attributes: { href } }, I18n.t("groups.requests.handle"));
+    return h("a", { attributes: { href } }, i18n("groups.requests.handle"));
   },
 });
 
+// glimmer-post-stream: has glimmer version
 createWidget("post-contents", {
   buildKey: (attrs) => `post-contents-${attrs.id}`,
 
@@ -523,39 +560,133 @@ createWidget("post-contents", {
 
     const extraState = {
       state: {
-        repliesShown: !!state.repliesBelow.length,
+        repliesShown: state.repliesBelow.length > 0,
         filteredRepliesShown: state.filteredRepliesShown,
       },
     };
-    result.push(this.attach("post-menu", attrs, extraState));
+
+    const filteredRepliesView = this.siteSettings.enable_filtered_replies_view;
+    result.push(
+      // TODO (glimmer-post-stream):
+      //  Once this widget shim is removed the `<section>...</section>` tag needs to be added to the PostMenu component
+      new RenderGlimmer(
+        this,
+        "section.post-menu-area.clearfix",
+        hbs`
+          <Post::Menu
+            @canCreatePost={{@data.canCreatePost}}
+            @filteredRepliesView={{@data.filteredRepliesView}}
+            @nextPost={{@data.nextPost}}
+            @post={{@data.post}}
+            @prevPost={{@data.prevPost}}
+            @repliesShown={{@data.repliesShown}}
+            @showReadIndicator={{@data.showReadIndicator}}
+            @changeNotice={{@data.changeNotice}}
+            @changePostOwner={{@data.changePostOwner}}
+            @copyLink={{@data.copyLink}}
+            @deletePost={{@data.deletePost}}
+            @editPost={{@data.editPost}}
+            @grantBadge={{@data.grantBadge}}
+            @lockPost={{@data.lockPost}}
+            @permanentlyDeletePost={{@data.permanentlyDeletePost}}
+            @rebakePost={{@data.rebakePost}}
+            @recoverPost={{@data.recoverPost}}
+            @replyToPost={{@data.replyToPost}}
+            @share={{@data.share}}
+            @showFlags={{@data.showFlags}}
+            @showLogin={{@data.showLogin}}
+            @showPagePublish={{@data.showPagePublish}}
+            @toggleLike={{@data.toggleLike}}
+            @togglePostType={{@data.togglePostType}}
+            @toggleReplies={{@data.toggleReplies}}
+            @toggleWiki={{@data.toggleWiki}}
+            @unhidePost={{@data.unhidePost}}
+            @unlockPost={{@data.unlockPost}}
+          />`,
+        {
+          canCreatePost: attrs.canCreatePost,
+          filteredRepliesView,
+          nextPost: attrs.nextPost,
+          post: this.findAncestorModel(),
+          prevPost: attrs.prevPost,
+          repliesShown: filteredRepliesView
+            ? extraState.state.filteredRepliesShown
+            : extraState.state.repliesShown,
+          showReadIndicator: attrs.showReadIndicator,
+          changeNotice: () => this.sendWidgetAction("changeNotice"), // this action comes from the post stream
+          changePostOwner: () => this.sendWidgetAction("changePostOwner"), // this action comes from the post stream
+          copyLink: () => this.sendWidgetAction("copyLink"),
+          deletePost: () => this.sendWidgetAction("deletePost"), // this action comes from the post stream
+          editPost: () => this.sendWidgetAction("editPost"), // this action comes from the post stream
+          expandHidden: () => this.sendWidgetAction("editPost"), // this action comes from the post stream
+          grantBadge: () => this.sendWidgetAction("grantBadge"), // this action comes from the post stream
+          lockPost: () => this.sendWidgetAction("lockPost"), // this action comes from the post stream
+          permanentlyDeletePost: () =>
+            this.sendWidgetAction("permanentlyDeletePost"),
+          rebakePost: () => this.sendWidgetAction("rebakePost"), // this action comes from the post stream
+          recoverPost: () => this.sendWidgetAction("recoverPost"), // this action comes from the post stream
+          replyToPost: () => this.sendWidgetAction("replyToPost"), // this action comes from the post stream
+          share: () => this.sendWidgetAction("share"),
+          showFlags: () => this.sendWidgetAction("showFlags"), // this action comes from the post stream
+          showLogin: () => this.sendWidgetAction("showLogin"), // this action comes from application route
+          showPagePublish: () => this.sendWidgetAction("showPagePublish"), // this action comes from the post stream
+          toggleLike: () => this.sendWidgetAction("toggleLike"),
+          togglePostType: () => this.sendWidgetAction("togglePostType"), // this action comes from the post stream
+          toggleReplies: filteredRepliesView
+            ? () => this.sendWidgetAction("toggleFilteredRepliesView")
+            : () => this.sendWidgetAction("toggleRepliesBelow"),
+          toggleWiki: () => this.sendWidgetAction("toggleWiki"), // this action comes from the post stream
+          unhidePost: () => this.sendWidgetAction("unhidePost"), // this action comes from the post stream
+          unlockPost: () => this.sendWidgetAction("unlockPost"), // this action comes from the post stream
+        }
+      )
+    );
 
     const repliesBelow = state.repliesBelow;
     if (repliesBelow.length) {
+      let children = [];
+
+      repliesBelow.forEach((p) => {
+        children.push(
+          this.attach("embedded-post", p, {
+            model: p.asPost,
+            state: {
+              role: "region",
+              "aria-label": i18n("post.sr_embedded_reply_description", {
+                post_number: attrs.post_number,
+                username: p.username,
+              }),
+            },
+          })
+        );
+      });
+
+      children.push(
+        this.attach("button", {
+          title: "post.collapse",
+          icon: "chevron-up",
+          action: "toggleRepliesBelow",
+          actionParam: true,
+          className: "btn collapse-up",
+          translatedAriaLabel: i18n("post.sr_collapse_replies"),
+        })
+      );
+
+      if (repliesBelow.length < this.attrs.replyCount) {
+        children.push(
+          this.attach("button", {
+            label: "post.load_more_replies",
+            action: "loadMoreReplies",
+            actionParam: repliesBelow[repliesBelow.length - 1]?.post_number,
+            className: "btn load-more-replies",
+          })
+        );
+      }
+
       result.push(
         h(
           `section.embedded-posts.bottom#embedded-posts__bottom--${this.attrs.post_number}`,
-          [
-            repliesBelow.map((p) => {
-              return this.attach("embedded-post", p, {
-                model: p.asPost,
-                state: {
-                  role: "region",
-                  "aria-label": I18n.t("post.sr_embedded_reply_description", {
-                    post_number: attrs.post_number,
-                    username: p.username,
-                  }),
-                },
-              });
-            }),
-            this.attach("button", {
-              title: "post.collapse",
-              icon: "chevron-up",
-              action: "toggleRepliesBelow",
-              actionParam: "true",
-              className: "btn collapse-up",
-              translatedAriaLabel: I18n.t("post.sr_collapse_replies"),
-            }),
-          ]
+          children
         )
       );
     }
@@ -596,38 +727,28 @@ createWidget("post-contents", {
     }
   },
 
-  toggleRepliesBelow(goToPost = "false") {
-    if (this.state.repliesBelow.length) {
-      this.state.repliesBelow = [];
-      if (goToPost === "true") {
-        DiscourseURL.routeTo(
-          `${this.attrs.topicUrl}/${this.attrs.post_number}`
-        );
-      }
-      return;
-    }
-
-    const post = this.findAncestorModel();
-    const topicUrl = post ? post.get("topic.url") : null;
+  loadMoreReplies(after = 1) {
     return this.store
-      .find("post-reply", { postId: this.attrs.id })
-      .then((posts) => {
-        this.state.repliesBelow = posts.map((p) => {
-          let result = transformWithCallbacks(p);
-
-          // these would conflict with computed properties with identical names
-          // in the post model if we kept them.
-          delete result.new_user;
-          delete result.deleted;
-          delete result.shareUrl;
-          delete result.firstPost;
-          delete result.usernameUrl;
-
-          result.customShare = `${topicUrl}/${p.post_number}`;
-          result.asPost = this.store.createRecord("post", result);
-          return result;
+      .find("post-reply", { postId: this.attrs.id, after })
+      .then((replies) => {
+        replies.forEach((reply) => {
+          this.state.repliesBelow.push(
+            transformWithCallbacks(reply, this.attrs.topicUrl, this.store)
+          );
         });
       });
+  },
+
+  toggleRepliesBelow(goToPost = false) {
+    if (this.state.repliesBelow.length) {
+      this.state.repliesBelow = [];
+      if (goToPost === true) {
+        const { topicUrl, post_number } = this.attrs;
+        DiscourseURL.routeTo(`${topicUrl}/${post_number}`);
+      }
+    } else {
+      return this.loadMoreReplies();
+    }
   },
 
   expandFirstPost() {
@@ -673,6 +794,7 @@ createWidget("post-contents", {
   },
 
   init() {
+    // TODO (glimmer-post-stream): How does this fit into the Glimmer lifecycle?
     this.postContentsDestroyCallbacks = [];
   },
 
@@ -681,6 +803,7 @@ createWidget("post-contents", {
   },
 });
 
+// glimmer-post-stream: has glimmer version
 createWidget("post-notice", {
   tagName: "div.post-notice",
 
@@ -699,9 +822,28 @@ createWidget("post-notice", {
 
   html(attrs) {
     if (attrs.notice.type === "custom") {
+      let createdByHTML = "";
+      if (attrs.noticeCreatedByUser) {
+        const createdByName = escapeExpression(
+          prioritizeNameInUx(attrs.noticeCreatedByUser.name)
+            ? attrs.noticeCreatedByUser.name
+            : attrs.noticeCreatedByUser.username
+        );
+        createdByHTML = i18n("post.notice.custom_created_by", {
+          userLinkHTML: `<a
+                  class="trigger-user-card"
+                  data-user-card="${attrs.noticeCreatedByUser.username}"
+                  title="${createdByName}"
+                  aria-hidden="false"
+                  role="listitem"
+                >${createdByName}</a>`,
+        });
+      }
       return [
         iconNode("user-shield"),
-        new RawHtml({ html: `<div>${attrs.notice.cooked}</div>` }),
+        new RawHtml({
+          html: `<div class="post-notice-message">${attrs.notice.cooked} ${createdByHTML}</div>`,
+        }),
       ];
     }
 
@@ -712,8 +854,8 @@ createWidget("post-notice", {
 
     if (attrs.notice.type === "new_user") {
       return [
-        iconNode("hands-helping"),
-        h("p", I18n.t("post.notice.new_user", { user })),
+        iconNode("handshake-angle"),
+        h("p", i18n("post.notice.new_user", { user })),
       ];
     }
 
@@ -721,33 +863,33 @@ createWidget("post-notice", {
       const timeAgo = (new Date() - new Date(attrs.notice.lastPostedAt)) / 1000;
       const time = relativeAgeMediumSpan(timeAgo, true);
       return [
-        iconNode("far-smile"),
-        h("p", I18n.t("post.notice.returning_user", { user, time })),
+        iconNode("far-face-smile"),
+        h("p", i18n("post.notice.returning_user", { user, time })),
       ];
     }
   },
 });
 
+// glimmer-post-stream: has glimmer version
 createWidget("post-body", {
   tagName: "div.topic-body.clearfix",
 
   html(attrs, state) {
+    const post = this.findAncestorModel();
     const postContents = this.attach("post-contents", attrs);
     let result = [this.attach("post-meta-data", attrs)];
     result = result.concat(
       applyDecorators(this, "after-meta-data", attrs, state)
     );
     result.push(postContents);
-    result.push(this.attach("actions-summary", attrs));
+    result.push(this.attach("actions-summary", { post }));
     result.push(this.attach("post-links", attrs));
-    if (attrs.showTopicMap) {
-      result.push(this.attach("topic-map", attrs));
-    }
 
     return result;
   },
 });
 
+// glimmer-post-stream: has glimmer version
 createWidget("post-article", {
   tagName: "article.boxed.onscreen-post",
   buildKey: (attrs) => `post-article-${attrs.id}`,
@@ -776,7 +918,7 @@ createWidget("post-article", {
 
   buildAttributes(attrs) {
     return {
-      "aria-label": I18n.t("share.post", {
+      "aria-label": i18n("share.post", {
         postNumber: attrs.post_number,
         username: attrs.username,
       }),
@@ -807,7 +949,7 @@ createWidget("post-article", {
                 title: "post.collapse",
                 icon: "chevron-down",
                 action: "toggleReplyAbove",
-                actionParam: "true",
+                actionParam: true,
                 className: "btn collapse-down",
               }),
               replies,
@@ -830,6 +972,11 @@ createWidget("post-article", {
         }),
       ])
     );
+
+    if (this.shouldShowTopicMap(attrs)) {
+      rows.push(this.buildTopicMap(attrs));
+    }
+
     return rows;
   },
 
@@ -838,7 +985,7 @@ createWidget("post-article", {
     return post ? post.get("topic.url") : null;
   },
 
-  toggleReplyAbove(goToPost = "false") {
+  toggleReplyAbove(goToPost = false) {
     const replyPostNumber = this.attrs.reply_to_post_number;
 
     if (this.siteSettings.enable_filtered_replies_view) {
@@ -863,10 +1010,9 @@ createWidget("post-article", {
 
     if (this.state.repliesAbove.length) {
       this.state.repliesAbove = [];
-      if (goToPost === "true") {
-        DiscourseURL.routeTo(
-          `${this.attrs.topicUrl}/${this.attrs.post_number}`
-        );
+      if (goToPost === true) {
+        const { topicUrl, post_number } = this.attrs;
+        DiscourseURL.routeTo(`${topicUrl}/${post_number}`);
       }
       return Promise.resolve();
     } else {
@@ -874,43 +1020,83 @@ createWidget("post-article", {
       return this.store
         .find("post-reply-history", { postId: this.attrs.id })
         .then((posts) => {
-          this.state.repliesAbove = posts.map((p) => {
-            let result = transformWithCallbacks(p);
-
-            // We don't want to overwrite CPs - we are doing something a bit weird
-            // here by creating a post object from a transformed post. They aren't
-            // 100% the same.
-            delete result.new_user;
-            delete result.deleted;
-            delete result.shareUrl;
-            delete result.firstPost;
-            delete result.usernameUrl;
-            delete result.topicNotificationLevel;
-
-            result.customShare = `${topicUrl}/${p.post_number}`;
-            result.asPost = this.store.createRecord("post", result);
-            return result;
+          posts.forEach((post) => {
+            this.state.repliesAbove.push(
+              transformWithCallbacks(post, topicUrl, this.store)
+            );
           });
         });
     }
   },
+
+  shouldShowTopicMap(attrs) {
+    if (attrs.post_number !== 1) {
+      return false;
+    }
+    const isPM = attrs.topic.archetype === "private_message";
+    const isRegular = attrs.topic.archetype === "regular";
+    const showWithoutReplies =
+      this.siteSettings.show_topic_map_in_topics_without_replies;
+
+    return (
+      attrs.topicMap ||
+      isPM ||
+      (isRegular && (attrs.topic.posts_count > 1 || showWithoutReplies))
+    );
+  },
+
+  buildTopicMap(attrs) {
+    return new RenderGlimmer(
+      this,
+      "div.topic-map.--op",
+      hbs`
+        <TopicMap
+          @model={{@data.model}}
+          @topicDetails={{@data.topicDetails}}
+          @postStream={{@data.postStream}}
+          @showPMMap={{@data.showPMMap}}
+          @showInvite={{@data.showInvite}}
+          @removeAllowedGroup={{@data.removeAllowedGroup}}
+          @removeAllowedUser={{@data.removeAllowedUser}}
+        />`,
+      {
+        model: attrs.topic,
+        topicDetails: attrs.topic.get("details"),
+        postStream: attrs.topic.postStream,
+        showPMMap: attrs.topic.archetype === "private_message",
+        showInvite: () => this.sendWidgetAction("showInvite"),
+        removeAllowedGroup: (group) =>
+          this.sendWidgetAction("removeAllowedGroup", group),
+        removeAllowedUser: (user) =>
+          this.sendWidgetAction("removeAllowedUser", user),
+      }
+    );
+  },
 });
 
-let addPostClassesCallbacks = null;
+const addPostClassesCallbacks = [];
+
 export function addPostClassesCallback(callback) {
-  addPostClassesCallbacks = addPostClassesCallbacks || [];
   addPostClassesCallbacks.push(callback);
 }
 
+// only for testing purposes
+export function resetPostClassesCallback() {
+  addPostClassesCallbacks.length = 0;
+}
+
+// glimmer-post-stream: has glimmer version
 export default createWidget("post", {
   buildKey: (attrs) => `post-${attrs.id}`,
   services: ["dialog", "user-tips"],
   shadowTree: true,
 
   buildAttributes(attrs) {
-    return attrs.height
+    const heightStyle = attrs.height
       ? { style: `min-height: ${attrs.height}px` }
       : undefined;
+
+    return { "data-post-number": attrs.post_number, ...heightStyle };
   },
 
   buildId(attrs) {
@@ -923,6 +1109,9 @@ export default createWidget("post", {
     }
     const classNames = ["topic-post", "clearfix"];
 
+    if (!attrs.mobileView) {
+      classNames.push("sticky-avatar");
+    }
     if (attrs.id === -1 || attrs.isSaving || attrs.staged) {
       classNames.push("staged");
     }
@@ -977,21 +1166,18 @@ export default createWidget("post", {
       return "";
     }
 
-    return [
-      this.attach("post-user-tip-shim"),
-      this.attach("post-article", attrs),
-    ];
+    return [this.attach("post-article", attrs)];
   },
 
-  toggleLike() {
+  async toggleLike() {
     const post = this.model;
     const likeAction = post.get("likeAction");
 
     if (likeAction && likeAction.get("canToggle")) {
-      return likeAction.togglePromise(post).then((result) => {
-        this.appEvents.trigger("page:like-toggled", post, likeAction);
-        return this._warnIfClose(result);
-      });
+      const result = await likeAction.togglePromise(post);
+
+      this.appEvents.trigger("page:like-toggled", post, likeAction);
+      return this._warnIfClose(result);
     }
   },
 
@@ -1012,8 +1198,54 @@ export default createWidget("post", {
     const { remaining, max } = result;
     const threshold = Math.ceil(max * 0.1);
     if (remaining === threshold) {
-      this.dialog.alert(I18n.t("post.few_likes_left"));
+      this.dialog.alert(i18n("post.few_likes_left"));
       kvs.set({ key: "lastWarnedLikes", value: Date.now() });
     }
   },
 });
+
+// TODO (glimmer-post-stream): Once this widget is removed the `<section>...</section>` tag needs to be added to the PostMenu component
+registerWidgetShim(
+  "glimmer-post",
+  "div",
+  hbs`
+    <Post
+      @canCreatePost={{@data.canCreatePost}}
+      @cancelFilter={{@data.cancelFilter}}
+      @changeNotice={{@data.changeNotice}}
+      @changePostOwner={{@data.changePostOwner}}
+      @deletePost={{@data.deletePost}}
+      @editPost={{@data.editPost}}
+      @expandHidden={{@expandHidden}}
+      @filteringRepliesToPostNumber={{@data.filteringRepliesToPostNumber}}
+      @grantBadge={{@data.grantBadge}}
+      @lockPost={{@data.lockPost}}
+      @multiSelect={{@data.multiSelect}}
+      @nextPost={{@data.nextPost}}
+      @permanentlyDeletePost={{@data.permanentlyDeletePost}}
+      @post={{@data.post}}
+      @prevPost={{@data.prevPost}}
+      @rebakePost={{@data.rebakePost}}
+      @recoverPost={{@data.recoverPost}}
+      @replyToPost={{@data.replyToPost}}
+      @selectBelow={{@data.selectBelow}}
+      @selectReplies={{@data.selectReplies}}
+      @selected={{@data.selected}}
+      @showFlags={{@data.showFlags}}
+      @showHistory={{@data.showHistory}}
+      @showInvite={{@data.showInvite}}
+      @showLogin={{@data.showLogin}}
+      @showPagePublish={{@data.showPagePublish}}
+      @showRawEmail={{@data.showRawEmail}}
+      @showReadIndicator={{@data.showReadIndicator}}
+      @togglePostSelection={{@data.togglePostSelection}}
+      @togglePostType={{@data.togglePostType}}
+      @toggleReplies={{@toggleReplies}}
+      @toggleReplyAbove={{@data.toggleReplyAbove}}
+      @toggleWiki={{@data.toggleWiki}}
+      @topicPageQueryParams={{@data.topicPageQueryParams}}
+      @unhidePost={{@data.unhidePost}}
+      @unlockPost={{@data.unlockPost}}
+      @updateTopicPageQueryParams={{@data.updateTopicPageQueryParams}}
+    />`
+);

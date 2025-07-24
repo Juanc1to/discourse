@@ -44,13 +44,32 @@ describe "Admin Customize Form Templates", type: :system do
       form_template_page.click_toggle_preview
       expect(form_template_page).to have_input_field("input")
     end
+
+    context "when using the view template modal" do
+      it "should navigate to the edit page when clicking the edit button" do
+        form_template_page.visit
+        form_template_page.click_view_form_template
+        form_template_page.find(".d-modal__footer .btn-primary").click
+        expect(page).to have_current_path("/admin/customize/form-templates/#{form_template.id}")
+      end
+
+      it "should delete the form template when clicking the delete button" do
+        form_template_page.visit
+        original_template_name = form_template.name
+        form_template_page.click_view_form_template
+        form_template_page.find(".d-modal__footer .btn-danger").click
+        form_template_page.find(".dialog-footer .btn-primary").click
+
+        expect(form_template_page).to have_no_form_template(original_template_name)
+      end
+    end
   end
 
   describe "when visiting the page to edit a form template" do
     it "should prefill form data" do
       visit("/admin/customize/form-templates/#{form_template.id}")
       expect(form_template_page).to have_name_value(form_template.name)
-      # TODO(@keegan) difficult to test the ace editor content, todo later
+      expect(ace_editor).to have_content(form_template.template)
     end
   end
 
@@ -113,11 +132,11 @@ describe "Admin Customize Form Templates", type: :system do
       form_template_page.type_in_template_name("New Template")
       ace_editor.type_input(
         "- type: input\n  id: name
-\b\b- type: textarea\n  id: description
-\b\b- type: checkbox\n  id: checkbox
-\b\b- type: dropdown\n  id: dropdown
-\b\b- type: upload\n  id: upload
-\b\b- type: multi-select\n  id: multi-select",
+- type: textarea\n  id: description
+- type: checkbox\n  id: checkbox
+- type: dropdown\n  id: dropdown
+- type: upload\n  id: upload
+- type: multi-select\n  id: multi-select",
       )
       form_template_page.click_preview_button
       expect(form_template_page).to have_input_field("input")

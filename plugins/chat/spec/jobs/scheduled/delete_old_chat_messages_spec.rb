@@ -1,11 +1,9 @@
 # frozen_string_literal: true
 
-require "rails_helper"
-
 describe Jobs::Chat::DeleteOldMessages do
   base_date = DateTime.parse("2020-12-01 00:00 UTC")
 
-  fab!(:public_channel) { Fabricate(:category_channel) }
+  fab!(:public_channel, :category_channel)
   fab!(:public_days_old_0) do
     Fabricate(:chat_message, chat_channel: public_channel, message: "hi", created_at: base_date)
   end

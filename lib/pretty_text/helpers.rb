@@ -18,7 +18,7 @@ module PrettyText
     def avatar_template(username)
       return "" unless username
       user = User.find_by(username_lower: username.downcase)
-      return "" unless user.present?
+      return "" if user.blank?
 
       # TODO: Add support for ES6 and call `avatar-template` directly
       UrlHelper.schemaless(UrlHelper.absolute(user.avatar_template))
@@ -27,7 +27,7 @@ module PrettyText
     def lookup_primary_user_group(username)
       return "" unless username
       user = User.find_by(username_lower: username.downcase)
-      return "" unless user.present?
+      return "" if user.blank?
 
       user.primary_group.try(:name) || ""
     end
@@ -44,6 +44,13 @@ module PrettyText
 
       urls.each do |url|
         sha1 = Upload.sha1_from_short_url(url)
+        if (url.split(".")[1].nil?) # video sha1 without extension for thumbnail
+          thumbnail = Upload.where("original_filename LIKE ?", "#{sha1}.%").last if sha1
+          # Fallback for old posts that don't contain data-video-base62-sha1
+          thumbnail = Upload.where("original_filename LIKE ?", "#{url}.%").last if thumbnail.nil? &&
+            sha1.nil?
+          sha1 = thumbnail.sha1 if thumbnail
+        end
         map[url] = sha1 if sha1
       end
 
@@ -104,11 +111,7 @@ module PrettyText
       # categories, however if the suppress_secured_categories_from_admin
       # site setting is activated then this user will not be able to access
       # secure categories, so hashtags that are secure will not render.
-      if cooking_user_id.blank?
-        cooking_user = Discourse.system_user
-      else
-        cooking_user = User.find(cooking_user_id)
-      end
+      cooking_user = User.find_by(id: cooking_user_id) || Discourse.system_user
 
       types_in_priority_order =
         types_in_priority_order.select do |type|

@@ -22,7 +22,10 @@ module SeedData
 
     def update(site_setting_names: nil, skip_changed: false)
       I18n.with_locale(@locale) do
-        topics(site_setting_names: site_setting_names).each do |params|
+        topics(
+          site_setting_names: site_setting_names,
+          require_existing_categories: false,
+        ).each do |params|
           update_topic(**params.except(:category, :after_create), skip_changed: skip_changed)
         end
       end
@@ -38,7 +41,7 @@ module SeedData
 
     def reseed_options
       I18n.with_locale(@locale) do
-        topics
+        topics(require_existing_categories: false)
           .map do |params|
             post = find_post(params[:site_setting_name])
             next unless post
@@ -51,7 +54,13 @@ module SeedData
 
     private
 
-    def topics(site_setting_names: nil, include_welcome_topics: true, include_legal_topics: true)
+    def topics(
+      site_setting_names: nil,
+      include_welcome_topics: true,
+      include_legal_topics: true,
+      require_existing_categories: true
+    )
+      general_category = Category.find_by(id: SiteSetting.general_category_id)
       staff_category = Category.find_by(id: SiteSetting.staff_category_id)
       feedback_category = Category.find_by(id: SiteSetting.meta_category_id)
       feedback_category_hashtag =
@@ -81,7 +90,14 @@ module SeedData
       # FAQ/Guidelines
       topics << {
         site_setting_name: "guidelines_topic_id",
-        title: I18n.t("guidelines_topic.title"),
+        title:
+          (
+            if SiteSetting.experimental_rename_faq_to_guidelines
+              I18n.t("guidelines_topic.guidelines_title")
+            else
+              I18n.t("guidelines_topic.title")
+            end
+          ),
         raw:
           I18n.t(
             "guidelines_topic.body",
@@ -105,7 +121,7 @@ module SeedData
 
       if include_welcome_topics
         # Welcome Topic
-        if general_category = Category.find_by(id: SiteSetting.general_category_id)
+        if general_category || !require_existing_categories
           site_info_quote =
             if SiteSetting.title.present? && SiteSetting.site_description.present?
               <<~RAW
@@ -194,7 +210,11 @@ module SeedData
 
       if !skip_changed || unchanged?(post)
         if post.trashed?
-          PostDestroyer.new(Discourse.system_user, post).recover
+          PostDestroyer.new(
+            Discourse.system_user,
+            post,
+            context: I18n.t("staff_action_logs.seed_data_topic_updated"),
+          ).recover
           post.reload
         end
 
@@ -210,7 +230,13 @@ module SeedData
       post = find_post(site_setting_name)
       return if !post
 
-      PostDestroyer.new(Discourse.system_user, post).destroy if !skip_changed || unchanged?(post)
+      if !skip_changed || unchanged?(post)
+        PostDestroyer.new(
+          Discourse.system_user,
+          post,
+          context: I18n.t("staff_action_logs.seed_data_topic_deleted"),
+        ).destroy
+      end
     end
 
     def find_post(site_setting_name, deleted: false)
@@ -247,7 +273,9 @@ module SeedData
         quick_start_filename = File.join(Rails.root, "docs", "ADMIN-QUICK-START-GUIDE.md")
       end
 
-      File.read(quick_start_filename)
+      content = File.read(quick_start_filename)
+      content.gsub!("%{base_url}", Discourse.base_url)
+      content
     end
   end
 end

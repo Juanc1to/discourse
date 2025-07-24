@@ -1,31 +1,40 @@
 import { computed } from "@ember/object";
 import { htmlSafe } from "@ember/template";
 import { h } from "virtual-dom";
+import {
+  customGroupActionCodes,
+  GROUP_ACTION_CODES,
+  ICONS,
+} from "discourse/components/post/small-action";
 import { autoUpdatingRelativeAge } from "discourse/lib/formatter";
+import { iconNode } from "discourse/lib/icon-library";
 import { userPath } from "discourse/lib/url";
 import DecoratorHelper from "discourse/widgets/decorator-helper";
 import { avatarFor } from "discourse/widgets/post";
 import PostCooked from "discourse/widgets/post-cooked";
 import RawHtml from "discourse/widgets/raw-html";
 import { createWidget } from "discourse/widgets/widget";
-import { iconNode } from "discourse-common/lib/icon-library";
-import I18n from "discourse-i18n";
+import { i18n } from "discourse-i18n";
 
 export function actionDescriptionHtml(actionCode, createdAt, username, path) {
-  const dt = new Date(createdAt);
-  const when = autoUpdatingRelativeAge(dt, {
-    format: "medium-with-ago-and-on",
-  });
+  const when = createdAt
+    ? autoUpdatingRelativeAge(new Date(createdAt), {
+        format: "medium-with-ago-and-on",
+      })
+    : "";
 
   let who = "";
   if (username) {
-    if (groupActionCodes.includes(actionCode)) {
+    if (
+      GROUP_ACTION_CODES.includes(actionCode) ||
+      customGroupActionCodes.includes(actionCode)
+    ) {
       who = `<a class="mention-group" href="/g/${username}">@${username}</a>`;
     } else {
       who = `<a class="mention" href="${userPath(username)}">@${username}</a>`;
     }
   }
-  return htmlSafe(I18n.t(`action_codes.${actionCode}`, { who, when, path }));
+  return htmlSafe(i18n(`action_codes.${actionCode}`, { who, when, path }));
 }
 
 export function actionDescription(
@@ -49,40 +58,8 @@ export function actionDescription(
 
 const addPostSmallActionClassesCallbacks = [];
 
-const groupActionCodes = ["invited_group", "removed_group"];
-
-const icons = {
-  "closed.enabled": "lock",
-  "closed.disabled": "unlock-alt",
-  "autoclosed.enabled": "lock",
-  "autoclosed.disabled": "unlock-alt",
-  "archived.enabled": "folder",
-  "archived.disabled": "folder-open",
-  "pinned.enabled": "thumbtack",
-  "pinned.disabled": "thumbtack unpinned",
-  "pinned_globally.enabled": "thumbtack",
-  "pinned_globally.disabled": "thumbtack unpinned",
-  "banner.enabled": "thumbtack",
-  "banner.disabled": "thumbtack unpinned",
-  "visible.enabled": "far-eye",
-  "visible.disabled": "far-eye-slash",
-  split_topic: "sign-out-alt",
-  invited_user: "plus-circle",
-  invited_group: "plus-circle",
-  user_left: "minus-circle",
-  removed_user: "minus-circle",
-  removed_group: "minus-circle",
-  public_topic: "comment",
-  private_topic: "envelope",
-  autobumped: "hand-point-right",
-};
-
 export function addPostSmallActionIcon(key, icon) {
-  icons[key] = icon;
-}
-
-export function addGroupPostSmallActionCode(actionCode) {
-  groupActionCodes.push(actionCode);
+  ICONS[key] = icon;
 }
 
 export function addPostSmallActionClassesCallback(callback) {
@@ -93,13 +70,14 @@ export function resetPostSmallActionClassesCallbacks() {
   addPostSmallActionClassesCallbacks.length = 0;
 }
 
+// glimmer-post-stream: has glimmer version
 export default createWidget("post-small-action", {
   buildKey: (attrs) => `post-small-act-${attrs.id}`,
   tagName: "article.small-action.onscreen-post",
 
   buildAttributes(attrs) {
     return {
-      "aria-label": I18n.t("share.post", {
+      "aria-label": i18n("share.post", {
         postNumber: attrs.post_number,
         username: attrs.username,
       }),
@@ -160,7 +138,7 @@ export default createWidget("post-small-action", {
       buttons.push(
         this.attach("button", {
           className: "btn-flat small-action-recover",
-          icon: "undo",
+          icon: "arrow-rotate-left",
           action: "recoverPost",
           title: "post.controls.undelete",
         })
@@ -171,7 +149,7 @@ export default createWidget("post-small-action", {
       buttons.push(
         this.attach("button", {
           className: "btn-flat small-action-edit",
-          icon: "pencil-alt",
+          icon: "pencil",
           action: "editPost",
           title: "post.controls.edit",
         })
@@ -182,7 +160,7 @@ export default createWidget("post-small-action", {
       buttons.push(
         this.attach("button", {
           className: "btn-flat btn-danger small-action-delete",
-          icon: "trash-alt",
+          icon: "trash-can",
           action: "deletePost",
           title: "post.controls.delete",
         })
@@ -190,7 +168,7 @@ export default createWidget("post-small-action", {
     }
 
     return [
-      h("div.topic-avatar", iconNode(icons[attrs.actionCode] || "exclamation")),
+      h("div.topic-avatar", iconNode(ICONS[attrs.actionCode] || "exclamation")),
       h("div.small-action-desc", [
         h("div.small-action-contents", contents),
         h("div.small-action-buttons", buttons),

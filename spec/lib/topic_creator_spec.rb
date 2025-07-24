@@ -3,7 +3,7 @@
 RSpec.describe TopicCreator do
   fab!(:user) { Fabricate(:user, trust_level: TrustLevel[2]) }
   fab!(:moderator)
-  fab!(:admin) { Fabricate(:admin, refresh_auto_groups: true) }
+  fab!(:admin)
 
   let(:valid_attrs) { Fabricate.attributes_for(:topic) }
   let(:pm_valid_attrs) do
@@ -91,6 +91,18 @@ RSpec.describe TopicCreator do
             )
           expect(topic.participant_count).to eq(3)
         end
+
+        describe "locale" do
+          it "updates the locale of the topic" do
+            topic = TopicCreator.create(user, Guardian.new(user), valid_attrs.merge(locale: "ja"))
+            expect(topic.locale).to eq("ja")
+          end
+
+          it "sets the locale of the topic to nil if blank" do
+            topic1 = TopicCreator.create(user, Guardian.new(user), valid_attrs.merge(locale: ""))
+            expect(topic1.locale).to eq(nil)
+          end
+        end
       end
     end
 
@@ -147,6 +159,27 @@ RSpec.describe TopicCreator do
 
           expect(topic).to be_valid
           expect(topic.tags).to contain_exactly(tag1, tag2)
+        end
+      end
+
+      context "with skip_validations option" do
+        it "allows the user to add tags even if they're not permitted" do
+          SiteSetting.tag_topic_allowed_groups = Group::AUTO_GROUPS[:trust_level_2]
+          user.update!(trust_level: TrustLevel[1])
+          Group.user_trust_level_change!(user.id, user.trust_level)
+          topic =
+            TopicCreator.create(
+              user,
+              Guardian.new(user),
+              valid_attrs.merge(
+                title: "This is a valid title",
+                raw: "Somewhat lengthy body for my cool topic",
+                tags: [tag1.name, tag2.name, "brandnewtag434"],
+                skip_validations: true,
+              ),
+            )
+          expect(topic).to be_persisted
+          expect(topic.tags.pluck(:name)).to contain_exactly(tag1.name, tag2.name, "brandnewtag434")
         end
       end
 
@@ -539,6 +572,29 @@ RSpec.describe TopicCreator do
           expect do
             TopicCreator.create(user, Guardian.new(user), pm_valid_attrs)
           end.to raise_error(ActiveRecord::Rollback)
+        end
+      end
+
+      context "with too many users in a group" do
+        fab!(:group) { Fabricate(:group, messageable_level: Group::ALIAS_LEVELS[:everyone]) }
+
+        before do
+          SiteSetting.group_pm_user_limit = 1
+          Fabricate.times(2, :user).each { |user| group.add(user) }
+          pm_valid_attrs[:target_group_names] = group.name
+        end
+
+        it "fails with an error" do
+          expect do
+            TopicCreator.create(user, Guardian.new(admin), pm_valid_attrs)
+          end.to raise_error(
+            ActiveRecord::Rollback,
+            I18n.t(
+              "activerecord.errors.models.topic.attributes.base.too_large_group",
+              limit: SiteSetting.group_pm_user_limit,
+              group_name: group.name,
+            ),
+          )
         end
       end
 

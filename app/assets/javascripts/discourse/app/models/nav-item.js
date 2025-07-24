@@ -2,7 +2,12 @@ import { tracked } from "@glimmer/tracking";
 import EmberObject from "@ember/object";
 import { dependentKeyCompat } from "@ember/object/compat";
 import { reads } from "@ember/object/computed";
-import { inject as service } from "@ember/service";
+import { service } from "@ember/service";
+import discourseComputed from "discourse/lib/decorators";
+import deprecated from "discourse/lib/deprecated";
+import { getOwnerWithFallback } from "discourse/lib/get-owner";
+import getURL from "discourse/lib/get-url";
+import { deepMerge } from "discourse/lib/object";
 import { emojiUnescape } from "discourse/lib/text";
 import {
   hasTrackedFilter,
@@ -11,12 +16,7 @@ import {
 import Category from "discourse/models/category";
 import Site from "discourse/models/site";
 import User from "discourse/models/user";
-import deprecated from "discourse-common/lib/deprecated";
-import { getOwnerWithFallback } from "discourse-common/lib/get-owner";
-import getURL from "discourse-common/lib/get-url";
-import { deepMerge } from "discourse-common/lib/object";
-import discourseComputed from "discourse-common/utils/decorators";
-import I18n from "discourse-i18n";
+import { i18n } from "discourse-i18n";
 
 export default class NavItem extends EmberObject {
   static extraArgsCallbacks = [];
@@ -180,10 +180,6 @@ export default class NavItem extends EmberObject {
         item.init(item, category, args);
       }
 
-      if (item.href) {
-        item.href = getURL(item.href);
-      }
-
       const before = item.before;
       if (before) {
         let i = 0;
@@ -198,7 +194,9 @@ export default class NavItem extends EmberObject {
       }
 
       if (item.customHref) {
-        item.set("href", item.customHref(category, args));
+        item.href = item.customHref(category, args);
+      } else if (item.href) {
+        item.href = getURL(item.href);
       }
 
       if (item.forceActive && item.forceActive(category, args)) {
@@ -220,6 +218,7 @@ export default class NavItem extends EmberObject {
   }
 
   @service topicTrackingState;
+  @service currentUser;
 
   @tracked name;
   @reads("name") filterType;
@@ -233,7 +232,13 @@ export default class NavItem extends EmberObject {
       return this._title;
     }
 
-    return I18n.t("filters." + this.name.replace("/", ".") + ".help", {});
+    let nameKey = this.name.replace("/", ".");
+
+    if (nameKey === "new" && this.currentUser?.new_new_view_enabled) {
+      nameKey = "new_new";
+    }
+
+    return i18n("filters." + nameKey + ".help", {});
   }
 
   set title(value) {
@@ -250,7 +255,7 @@ export default class NavItem extends EmberObject {
 
     if (
       this.name === "latest" &&
-      (!Site.currentProp("mobileView") || this.tagId !== undefined)
+      (Site.currentProp("desktopView") || this.tagId !== undefined)
     ) {
       count = 0;
     }
@@ -259,7 +264,7 @@ export default class NavItem extends EmberObject {
     const titleKey = count === 0 ? ".title" : ".title_with_count";
 
     return emojiUnescape(
-      I18n.t(`filters.${this.name.replace("/", ".") + titleKey}`, extra)
+      i18n(`filters.${this.name.replace("/", ".") + titleKey}`, extra)
     );
   }
 
@@ -309,25 +314,21 @@ export default class NavItem extends EmberObject {
     "topicTrackingState.messageCount"
   )
   count(name, category, tagId, noSubcategories, currentRouteQueryParams) {
-    const state = this.topicTrackingState;
-
-    if (state) {
-      return state.lookupCount({
-        type: name,
-        category,
-        tagId,
-        noSubcategories,
-        customFilterFn: hasTrackedFilter(currentRouteQueryParams)
-          ? isTrackedTopic
-          : undefined,
-      });
-    }
+    return this.topicTrackingState?.lookupCount({
+      type: name,
+      category,
+      tagId,
+      noSubcategories,
+      customFilterFn: hasTrackedFilter(currentRouteQueryParams)
+        ? isTrackedTopic
+        : undefined,
+    });
   }
 }
 
-class ExtraNavItem extends NavItem {
+export class ExtraNavItem extends NavItem {
   @tracked href;
-  count = 0;
+  @tracked count = 0;
   customFilter = null;
 }
 

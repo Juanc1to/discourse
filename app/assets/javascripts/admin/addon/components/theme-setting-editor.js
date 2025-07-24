@@ -1,17 +1,20 @@
-import { ajax } from "discourse/lib/ajax";
-import { url } from "discourse/lib/computed";
+import { service } from "@ember/service";
+import { i18n } from "discourse-i18n";
 import SiteSettingComponent from "./site-setting";
 
-export default class extends SiteSettingComponent {
-  @url("model.id", "/admin/themes/%@/setting") updateUrl;
+export default class ThemeSettingEditor extends SiteSettingComponent {
+  @service toasts;
 
   _save() {
-    return ajax(this.updateUrl, {
-      type: "PUT",
-      data: {
-        name: this.setting.setting,
-        value: this.get("buffered.value"),
-      },
-    });
+    return this.setting
+      .updateSetting(this.args.model.id, this.buffered.get("value"))
+      .then(() => {
+        this.toasts.success({
+          data: {
+            message: i18n("admin.customize.theme.theme_setting_saved"),
+          },
+          duration: "short",
+        });
+      });
   }
 }

@@ -2,11 +2,12 @@ import { cancel } from "@ember/runloop";
 import { Promise } from "rsvp";
 import { ajax } from "discourse/lib/ajax";
 import { CANCELLED_STATUS } from "discourse/lib/autocomplete";
+import { camelCaseToSnakeCase } from "discourse/lib/case-converter";
+import discourseDebounce from "discourse/lib/debounce";
+import { isTesting } from "discourse/lib/environment";
+import discourseLater from "discourse/lib/later";
 import { userPath } from "discourse/lib/url";
 import { emailValid } from "discourse/lib/utilities";
-import { isTesting } from "discourse-common/config/environment";
-import discourseDebounce from "discourse-common/lib/debounce";
-import discourseLater from "discourse-common/lib/later";
 
 let cache = {},
   cacheKey,
@@ -22,10 +23,6 @@ export function resetUserSearchCache() {
   oldSearch = null;
 }
 
-export function camelCaseToSnakeCase(text) {
-  return text.replace(/([a-zA-Z])(?=[A-Z])/g, "$1_").toLowerCase();
-}
-
 function performSearch(
   term,
   topicId,
@@ -38,6 +35,7 @@ function performSearch(
   groupMembersOf,
   includeStagedUsers,
   lastSeenUsers,
+  prioritizedUserId,
   limit,
   resultsFn
 ) {
@@ -67,6 +65,7 @@ function performSearch(
     topic_allowed_users: allowedUsers,
     include_staged_users: includeStagedUsers,
     last_seen_users: lastSeenUsers,
+    prioritized_user_id: prioritizedUserId,
     limit,
   };
 
@@ -122,6 +121,7 @@ let debouncedSearch = function (
   groupMembersOf,
   includeStagedUsers,
   lastSeenUsers,
+  prioritizedUserId,
   limit,
   resultsFn
 ) {
@@ -139,6 +139,7 @@ let debouncedSearch = function (
     groupMembersOf,
     includeStagedUsers,
     lastSeenUsers,
+    prioritizedUserId,
     limit,
     resultsFn,
     300
@@ -163,50 +164,121 @@ function organizeResults(r, options) {
   const users = [],
     emails = [],
     groups = [];
-  let resultsLength = 0;
 
   if (r.users) {
     r.users.forEach((user) => {
-      if (resultsLength < options.limit && !exclude.includes(user.username)) {
+      if (!exclude.includes(user.username)) {
         user.isUser = true;
         user.isMetadataMatch =
           !lowerCaseIncludes(user.username, term) &&
           !lowerCaseIncludes(user.name, term);
         users.push(user);
-        resultsLength += 1;
       }
     });
   }
 
   if (options.allowEmails && emailValid(options.term)) {
     emails.push({ username: options.term, isEmail: true });
-    resultsLength += 1;
   }
 
   if (r.groups) {
     r.groups.forEach((group) => {
-      if (
-        (options.term.toLowerCase() === group.name.toLowerCase() ||
-          resultsLength < options.limit) &&
-        !exclude.includes(group.name)
-      ) {
+      if (!exclude.includes(group.name)) {
         group.isGroup = true;
         groups.push(group);
-        resultsLength += 1;
       }
     });
   }
 
-  const results = [
-    ...users.filter((u) => !u.isMetadataMatch),
+  // Build prioritized list
+  const exactUsernameSet = new Set();
+  const partialUsernameSet = new Set();
+  const exactGroupSet = new Set();
+  const exactNameSet = new Set();
+
+  // 1. Exact username matches
+  const exactUsernameMatches = users.filter((u) => {
+    if (u.username.toLowerCase() !== term?.toLowerCase()) {
+      return false;
+    }
+    exactUsernameSet.add(u.username);
+    return true;
+  });
+
+  // 2. Exact group name matches
+  const exactGroupMatches = groups.filter((g) => {
+    if (g.name.toLowerCase() !== term?.toLowerCase()) {
+      return false;
+    }
+    exactGroupSet.add(g.name);
+    return true;
+  });
+
+  // 3. Partial username matches (not already in exact matches)
+  const partialUsernameMatches = users.filter((u) => {
+    if (
+      exactUsernameSet.has(u.username) ||
+      u.isMetadataMatch ||
+      !lowerCaseIncludes(u.username, term)
+    ) {
+      return false;
+    }
+    partialUsernameSet.add(u.username);
+    return true;
+  });
+
+  // 4. Partial group name matches (not already in exact matches)
+  const partialGroupMatches = groups.filter(
+    (g) =>
+      !term || (!exactGroupSet.has(g.name) && lowerCaseIncludes(g.name, term))
+  );
+
+  // 5. Exact name matches (not already included via username)
+  const exactNameMatches = users.filter((u) => {
+    if (
+      exactUsernameSet.has(u.username) ||
+      partialUsernameSet.has(u.username) ||
+      u.name?.toLowerCase() !== term?.toLowerCase() ||
+      u.isMetadataMatch
+    ) {
+      return false;
+    }
+    exactNameSet.add(u.username);
+    return true;
+  });
+
+  // 6. Partial name matches (not already included)
+  const partialNameMatches = users.filter(
+    (u) =>
+      !exactUsernameSet.has(u.username) &&
+      !partialUsernameSet.has(u.username) &&
+      !exactNameSet.has(u.username) &&
+      lowerCaseIncludes(u.name, term) &&
+      !u.isMetadataMatch
+  );
+
+  // 7. Users with metadata match
+  const metadataMatchUsers = users.filter((u) => u.isMetadataMatch);
+
+  // Build the prioritized results in the new order
+  const prioritizedResults = [
+    ...exactUsernameMatches,
+    ...exactGroupMatches,
     ...emails,
-    ...groups,
-    ...users.filter((u) => u.isMetadataMatch),
+    ...partialUsernameMatches,
+    ...partialGroupMatches,
+    ...exactNameMatches,
+    ...partialNameMatches,
+    ...metadataMatchUsers,
   ];
 
-  results.users = users;
-  results.emails = emails;
-  results.groups = groups;
+  // Truncate to limit
+  const results = prioritizedResults.slice(0, options.limit);
+
+  // Only include users, emails, and groups that are actually in the results
+  results.users = results.filter((item) => item.isUser);
+  results.emails = results.filter((item) => item.isEmail);
+  results.groups = results.filter((item) => item.isGroup);
   return results;
 }
 
@@ -250,6 +322,7 @@ export default function userSearch(options) {
     groupMembersOf = options.groupMembersOf,
     includeStagedUsers = options.includeStagedUsers,
     lastSeenUsers = options.lastSeenUsers,
+    prioritizedUserId = options.prioritizedUserId,
     limit = options.limit || 6;
 
   if (oldSearch) {
@@ -290,6 +363,7 @@ export default function userSearch(options) {
       groupMembersOf,
       includeStagedUsers,
       lastSeenUsers,
+      prioritizedUserId,
       limit,
       function (r) {
         cancel(clearPromise);

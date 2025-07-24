@@ -4,12 +4,13 @@ RSpec.describe "Outgoing chat webhooks" do
   before do
     SiteSetting.chat_enabled = true
     SiteSetting.chat_allowed_groups = Group::AUTO_GROUPS[:everyone]
+    SiteSetting.direct_message_enabled_groups = Group::AUTO_GROUPS[:everyone]
   end
 
   describe "chat messages" do
-    fab!(:web_hook) { Fabricate(:outgoing_chat_message_web_hook) }
-    fab!(:user1) { Fabricate(:user) }
-    fab!(:user2) { Fabricate(:user) }
+    fab!(:web_hook, :outgoing_chat_message_web_hook)
+    fab!(:user1, :user)
+    fab!(:user2, :user)
     let(:message_content) { "This is a test message" }
     let(:new_message_content) { "This is the edited message" }
     let(:job_args) do
@@ -101,19 +102,11 @@ RSpec.describe "Outgoing chat webhooks" do
     context "for a category channel" do
       fab!(:category)
       fab!(:chat_channel) { Fabricate(:category_channel, chatable: category) }
-      fab!(:chat_message) { Fabricate(:chat_message, chat_channel: chat_channel, user: user1) }
-
-      before do
-        [user1, user2].each do |user|
-          Chat::UserChatChannelMembership.create(
-            user: user,
-            chat_channel: chat_channel,
-            following: true,
-          )
-        end
-
-        sign_in(user1)
+      fab!(:chat_message) do
+        Fabricate(:chat_message, use_service: true, chat_channel: chat_channel, user: user1)
       end
+
+      before { sign_in(user1) }
 
       it "triggers a webhook when a chat message is created" do
         post "/chat/#{chat_channel.id}.json", params: { message: message_content }
@@ -174,7 +167,12 @@ RSpec.describe "Outgoing chat webhooks" do
       fab!(:direct_message) { Fabricate(:direct_message, users: [user1, user2]) }
       fab!(:direct_message_channel) { Fabricate(:direct_message_channel, chatable: direct_message) }
       fab!(:chat_message) do
-        Fabricate(:chat_message, chat_channel: direct_message_channel, user: user1)
+        Fabricate(
+          :chat_message,
+          use_service: true,
+          chat_channel: direct_message_channel,
+          user: user1,
+        )
       end
 
       before { sign_in(user1) }

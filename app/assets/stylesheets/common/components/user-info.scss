@@ -1,7 +1,10 @@
+@use "lib/viewport";
+
 // Common styles for "user-info" component
 .user-info {
   display: flex;
   gap: 1em;
+  margin-bottom: 0.75rem;
 
   .user-image-inner {
     position: relative;
@@ -10,7 +13,8 @@
 
   .user-detail {
     min-width: 0;
-    @include breakpoint(mobile-medium) {
+
+    @include viewport.until(sm) {
       font-size: var(--font-down-1);
     }
 
@@ -21,9 +25,11 @@
         gap: 0 0.5em;
         color: var(--primary-high);
       }
+
       .name,
       .username {
         width: 100%;
+
         @include ellipsis;
       }
 
@@ -34,6 +40,7 @@
 
     .details {
       color: var(--primary);
+
       .d-icon-reply {
         color: var(--primary-medium);
       }
@@ -41,6 +48,7 @@
 
     .title {
       color: var(--primary-medium);
+
       @include ellipsis;
     }
   }

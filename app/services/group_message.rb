@@ -70,7 +70,13 @@ class GroupMessage
         )
     end
 
-    posts.find_each { |post| PostDestroyer.new(Discourse.system_user, post).destroy }
+    posts.find_each do |post|
+      PostDestroyer.new(
+        Discourse.system_user,
+        post,
+        context: I18n.t("staff_action_logs.reminder_deleted"),
+      ).destroy
+    end
   end
 
   def message_params
@@ -78,7 +84,10 @@ class GroupMessage
       begin
         h = { base_url: Discourse.base_url }.merge(@opts[:message_params] || {})
         if @opts[:user]
-          h.merge!(username: @opts[:user].username, user_url: user_path(@opts[:user].username))
+          h.merge!(
+            username: @opts[:user].username,
+            user_url: user_path(@opts[:user].encoded_username(lower: true)),
+          )
         end
         h
       end

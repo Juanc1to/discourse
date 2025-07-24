@@ -48,14 +48,14 @@ RSpec.describe Discourse do
     context "with a non standard port specified" do
       before { SiteSetting.port = 3000 }
 
-      it "returns the non standart port in the base url" do
+      it "returns the non standard port in the base url" do
         expect(Discourse.base_url).to eq("http://foo.com:3000")
       end
     end
   end
 
   describe "asset_filter_options" do
-    it "obmits path if request is missing" do
+    it "omits path if request is missing" do
       opts = Discourse.asset_filter_options(:js, nil)
       expect(opts[:path]).to be_blank
     end
@@ -194,9 +194,17 @@ RSpec.describe Discourse do
     end
   end
 
+  describe "#user_agent" do
+    it "returns a user agent string" do
+      expect(Discourse.user_agent).to eq(
+        "Discourse/#{Discourse::VERSION::STRING}-#{Discourse.git_version}; +https://www.discourse.org/",
+      )
+    end
+  end
+
   describe "#site_contact_user" do
     fab!(:admin)
-    fab!(:another_admin) { Fabricate(:admin) }
+    fab!(:another_admin, :admin)
 
     it "returns the user specified by the site setting site_contact_username" do
       SiteSetting.site_contact_username = another_admin.username
@@ -253,6 +261,16 @@ RSpec.describe Discourse do
     end
 
     describe ".enable_readonly_mode" do
+      it "doesn't expire when expires is false" do
+        Discourse.enable_readonly_mode(user_readonly_mode_key, expires: false)
+        expect(Discourse.redis.ttl(user_readonly_mode_key)).to eq(-1)
+      end
+
+      it "expires when expires is true" do
+        Discourse.enable_readonly_mode(user_readonly_mode_key, expires: true)
+        expect(Discourse.redis.ttl(user_readonly_mode_key)).not_to eq(-1)
+      end
+
       it "adds a key in redis and publish a message through the message bus" do
         expect(Discourse.redis.get(readonly_mode_key)).to eq(nil)
       end
@@ -344,7 +362,7 @@ RSpec.describe Discourse do
     class TempSidekiqLogger
       attr_accessor :exception, :context
 
-      def call(ex, ctx)
+      def call(ex, ctx, _config)
         self.exception = ex
         self.context = ctx
       end
@@ -352,9 +370,9 @@ RSpec.describe Discourse do
 
     let!(:logger) { TempSidekiqLogger.new }
 
-    before { Sidekiq.error_handlers << logger }
+    before { Sidekiq.default_configuration.error_handlers << logger }
 
-    after { Sidekiq.error_handlers.delete(logger) }
+    after { Sidekiq.default_configuration.error_handlers.delete(logger) }
 
     describe "#job_exception_stats" do
       class FakeTestError < StandardError
@@ -436,12 +454,11 @@ RSpec.describe Discourse do
       old_method(m)
     end
 
-    before do
-      @orig_logger = Rails.logger
-      Rails.logger = @fake_logger = FakeLogger.new
-    end
+    let(:fake_logger) { FakeLogger.new }
 
-    after { Rails.logger = @orig_logger }
+    before { Rails.logger.broadcast_to(fake_logger) }
+
+    after { Rails.logger.stop_broadcasting_to(fake_logger) }
 
     it "can deprecate usage" do
       k = SecureRandom.hex
@@ -449,19 +466,19 @@ RSpec.describe Discourse do
       expect(old_method_caller(k)).to include("discourse_spec")
       expect(old_method_caller(k)).to include(k)
 
-      expect(@fake_logger.warnings).to eq([old_method_caller(k)])
+      expect(fake_logger.warnings).to eq([old_method_caller(k)])
     end
 
     it "can report the deprecated version" do
       Discourse.deprecate(SecureRandom.hex, since: "2.1.0.beta1")
 
-      expect(@fake_logger.warnings[0]).to include("(deprecated since Discourse 2.1.0.beta1)")
+      expect(fake_logger.warnings[0]).to include("(deprecated since Discourse 2.1.0.beta1)")
     end
 
     it "can report the drop version" do
       Discourse.deprecate(SecureRandom.hex, drop_from: "2.3.0")
 
-      expect(@fake_logger.warnings[0]).to include("(removal in Discourse 2.3.0)")
+      expect(fake_logger.warnings[0]).to include("(removal in Discourse 2.3.0)")
     end
 
     it "can raise deprecation error" do
@@ -540,6 +557,12 @@ RSpec.describe Discourse do
       expect(Discourse::Utils.execute_command("echo a b c", unsafe_shell: true).strip).to eq(
         "a b c",
       )
+    end
+
+    it "includes the command in the error message" do
+      expect do
+        Discourse::Utils.execute_command("false", "'foo'", failure_message: "oops")
+      end.to raise_error(RuntimeError, "false 'foo'\noops")
     end
   end
 
@@ -623,7 +646,7 @@ RSpec.describe Discourse do
       css_link_tag =
         Nokogiri::HTML5
           .fragment(
-            Stylesheet::Manager.new(theme_id: theme.id).stylesheet_link_tag(:desktop_theme, "all"),
+            Stylesheet::Manager.new(theme_id: theme.id).stylesheet_link_tag(:common_theme, "all"),
           )
           .css("link")
           .first
@@ -649,7 +672,7 @@ RSpec.describe Discourse do
       css_link_tag =
         Nokogiri::HTML5
           .fragment(
-            Stylesheet::Manager.new(theme_id: theme.id).stylesheet_link_tag(:desktop_theme, "all"),
+            Stylesheet::Manager.new(theme_id: theme.id).stylesheet_link_tag(:common_theme, "all"),
           )
           .css("link")
           .first
@@ -674,7 +697,7 @@ RSpec.describe Discourse do
       css_link_tag =
         Nokogiri::HTML5
           .fragment(
-            Stylesheet::Manager.new(theme_id: theme.id).stylesheet_link_tag(:desktop_theme, "all"),
+            Stylesheet::Manager.new(theme_id: theme.id).stylesheet_link_tag(:common_theme, "all"),
           )
           .css("link")
           .first

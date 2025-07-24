@@ -1,7 +1,7 @@
 # frozen_string_literal: true
 
 class StaticController < ApplicationController
-  skip_before_action :check_xhr, :redirect_to_login_if_required
+  skip_before_action :check_xhr, :redirect_to_login_if_required, :redirect_to_profile_if_required
   skip_before_action :verify_authenticity_token,
                      only: %i[cdn_asset enter favicon service_worker_asset]
   skip_before_action :preload_json, only: %i[cdn_asset enter favicon service_worker_asset]
@@ -27,13 +27,48 @@ class StaticController < ApplicationController
   }
   CUSTOM_PAGES = {} # Add via `#add_topic_static_page` in plugin API
 
+  def extract_redirect_param
+    redirect_path = params[:redirect]
+    if redirect_path.present?
+      begin
+        forum_host = URI(Discourse.base_url).host
+        uri = URI(redirect_path)
+
+        if uri.path.present? && !uri.path.starts_with?(login_path) &&
+             (uri.host.blank? || uri.host == forum_host) && uri.path =~ %r{\A\/{1}[^\.\s]*\z}
+          return "#{uri.path}#{uri.query ? "?#{uri.query}" : ""}"
+        end
+      rescue URI::Error, ArgumentError
+        # If the URI is invalid, return "/" below
+      end
+    end
+
+    "/"
+  end
+
   def show
-    if current_user && (params[:id] == "login" || params[:id] == "signup")
-      return redirect_to(path "/")
+    if params[:id] == "login"
+      destination = extract_redirect_param
+
+      if current_user
+        return redirect_to(path(destination), allow_other_host: false)
+      elsif destination != "/"
+        cookies[:destination_url] = path(destination)
+      end
+    elsif params[:id] == "signup" && current_user
+      return redirect_to path("/")
     end
 
     if SiteSetting.login_required? && current_user.nil? && %w[faq guidelines].include?(params[:id])
       return redirect_to path("/login")
+    end
+
+    rename_faq = SiteSetting.experimental_rename_faq_to_guidelines
+
+    if rename_faq
+      redirect_paths = %w[/rules /conduct]
+      redirect_paths << "/faq" if SiteSetting.faq_url.blank?
+      return redirect_to(path("/guidelines")) if redirect_paths.include?(request.path)
     end
 
     map = DEFAULT_PAGES.deep_merge(CUSTOM_PAGES)
@@ -58,15 +93,23 @@ class StaticController < ApplicationController
       @topic = Topic.find_by_id(SiteSetting.get(topic_id))
       raise Discourse::NotFound unless @topic
 
+      page_name =
+        if @page == "faq"
+          rename_faq ? "guidelines" : "faq"
+        else
+          @page
+        end
+
       title_prefix =
-        if I18n.exists?("js.#{@page}")
-          I18n.t("js.#{@page}")
+        if I18n.exists?("js.#{page_name}")
+          I18n.t("js.#{page_name}")
         else
           @topic.title
         end
       @title = "#{title_prefix} - #{SiteSetting.title}"
       @body = @topic.posts.first.cooked
       @faq_overridden = !SiteSetting.faq_url.blank?
+      @experimental_rename_faq_to_guidelines = rename_faq
 
       render :show, layout: !request.xhr?, formats: [:html]
       return
@@ -107,28 +150,11 @@ class StaticController < ApplicationController
     params.delete(:username)
     params.delete(:password)
 
-    destination = path("/")
-
-    redirect_location = params[:redirect]
-    if redirect_location.present? && !redirect_location.is_a?(String)
-      raise Discourse::InvalidParameters.new(:redirect)
-    elsif redirect_location.present? && !redirect_location.match(login_path)
-      begin
-        forum_uri = URI(Discourse.base_url)
-        uri = URI(redirect_location)
-
-        if uri.path.present? && (uri.host.blank? || uri.host == forum_uri.host) && uri.path !~ /\./
-          destination = "#{uri.path}#{uri.query ? "?#{uri.query}" : ""}"
-        end
-      rescue URI::Error
-        # Do nothing if the URI is invalid
-      end
-    end
-
-    redirect_to destination
+    destination = extract_redirect_param
+    redirect_to(destination, allow_other_host: false)
   end
 
-  FAVICON ||= -"favicon"
+  FAVICON = -"favicon"
 
   # We need to be able to draw our favicon on a canvas, this happens when you enable the feature
   # that draws the notification count on top of favicon (per user default off)
@@ -162,7 +188,7 @@ class StaticController < ApplicationController
 
               file&.read || ""
             rescue => e
-              AdminDashboardData.add_problem_message("dashboard.bad_favicon_url", 1800)
+              ProblemCheckTracker[:bad_favicon_url].problem!
               Rails.logger.debug("Failed to fetch favicon #{favicon.url}: #{e}\n#{e.backtrace}")
               ""
             ensure
@@ -202,23 +228,7 @@ class StaticController < ApplicationController
         # Maximum cache that the service worker will respect is 24 hours.
         # However, ensure that these may be cached and served for longer on servers.
         immutable_for 1.year
-
-        if Rails.application.assets_manifest.assets["service-worker.js"]
-          path =
-            File.expand_path(
-              Rails.root +
-                "public/assets/#{Rails.application.assets_manifest.assets["service-worker.js"]}",
-            )
-          response.headers["Last-Modified"] = File.ctime(path).httpdate
-        end
-        content = Rails.application.assets_manifest.find_sources("service-worker.js").first
-
-        base_url = File.dirname(helpers.script_asset_path("service-worker"))
-        content =
-          content.sub(%r{^//# sourceMappingURL=(service-worker-.+\.map)$}) do
-            "//# sourceMappingURL=#{base_url}/#{Regexp.last_match(1)}"
-          end
-        render(plain: content, content_type: "application/javascript")
+        render "service-worker"
       end
     end
   end

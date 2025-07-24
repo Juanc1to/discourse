@@ -19,7 +19,11 @@ module PageObjects
         end
 
         def find_section(name)
-          find(".sidebar-section[data-section-name='#{name}']")
+          find(sidebar_section_selector(name))
+        end
+
+        def click_section_header(name)
+          find("#{sidebar_section_selector(name)} .sidebar-section-header").click
         end
 
         def click_section_link(name)
@@ -59,8 +63,17 @@ module PageObjects
           has_no_css?(".sidebar-sections [data-section-name='#{name.parameterize}']")
         end
 
+        def has_section_expanded?(name)
+          has_css?("#{sidebar_section_selector(name)}.sidebar-section--expanded")
+        end
+
+        def has_section_collapsed?(name)
+          has_css?("#{sidebar_section_selector(name)}.sidebar-section--collapsed")
+        end
+
         def switch_to_chat
           find(".sidebar__panel-switch-button[data-key='chat']").click
+          has_no_css?(".sidebar__panel-switch-button[data-key='chat']")
         end
 
         def switch_to_main
@@ -120,6 +133,10 @@ module PageObjects
           expect(section_link["title"]).to eq(title)
         end
 
+        def find_section_link(name)
+          find(".#{SIDEBAR_SECTION_LINK_SELECTOR}[data-link-name='#{name}']")
+        end
+
         def primary_section_links(slug)
           all("[data-section-name='#{slug}'] .sidebar-section-link-wrapper").map(&:text)
         end
@@ -138,14 +155,24 @@ module PageObjects
           click_button(add_section_button_text)
         end
 
+        def click_add_link_button
+          click_button(add_link_button_text)
+        end
+
         def has_no_add_section_button?
-          page.has_no_button?(add_section_button_text)
+          has_no_css?(add_section_button_css)
+        end
+
+        def has_add_section_button?
+          has_css?(add_section_button_css)
         end
 
         def click_edit_categories_button
           within(".sidebar-section[data-section-name='categories']") do
             click_button(class: "sidebar-section-header-button", visible: false)
           end
+
+          expect(page).to have_css(".d-modal:not(.is-animating)")
 
           PageObjects::Modals::SidebarEditCategories.new
         end
@@ -155,20 +182,35 @@ module PageObjects
             click_button(class: "sidebar-section-header-button", visible: false)
           end
 
+          expect(page).to have_css(".d-modal:not(.is-animating)")
+          expect(page).to have_css(".d-modal .sidebar-tags-form")
+
           PageObjects::Modals::SidebarEditTags.new
         end
 
         def edit_custom_section(name)
           name = name.parameterize
 
-          find(".sidebar-section[data-section-name='#{name}']").hover
+          if page.has_css?("html.mobile-view", wait: 0)
+            find(
+              ".sidebar-section[data-section-name='#{name}'] button.sidebar-section-header-button",
+              visible: false,
+            ).click
+          else
+            section_selector =
+              ".sidebar-section[data-section-name='#{name}'] .sidebar-section-header-wrapper"
 
-          find(
-            ".sidebar-section[data-section-name='#{name}'] button.sidebar-section-header-button",
-          ).click
+            page.driver.with_playwright_page { |pw_page| pw_page.locator(section_selector).hover }
+            expect(page).to have_css("button.sidebar-section-header-button", visible: true)
+            find("#{section_selector} button.sidebar-section-header-button").click
+          end
         end
 
         private
+
+        def sidebar_section_selector(name)
+          ".sidebar-section[data-section-name='#{name}']"
+        end
 
         def section_link_present?(name, href: nil, active: false, target: nil, count: 1, present:)
           attributes = { exact_text: name }
@@ -182,6 +224,14 @@ module PageObjects
 
         def add_section_button_text
           I18n.t("js.sidebar.sections.custom.add")
+        end
+
+        def add_link_button_text
+          I18n.t("js.sidebar.sections.custom.links.add")
+        end
+
+        def add_section_button_css
+          ".sidebar-footer-actions-button.add-section"
         end
       end
     end

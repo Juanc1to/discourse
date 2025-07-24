@@ -4,7 +4,7 @@ RSpec.describe PostDestroyer do
   before { UserActionManager.enable }
 
   fab!(:moderator) { Fabricate(:moderator, refresh_auto_groups: true) }
-  fab!(:admin) { Fabricate(:admin, refresh_auto_groups: true) }
+  fab!(:admin)
   fab!(:coding_horror) { Fabricate(:coding_horror, refresh_auto_groups: true) }
   let(:post) { create_post }
 
@@ -301,12 +301,13 @@ RSpec.describe PostDestroyer do
         end
 
         context "when recovered by user with access to moderate topic category" do
-          fab!(:review_user) { Fabricate(:user) }
+          fab!(:review_user, :user)
 
           before do
             SiteSetting.enable_category_group_moderation = true
             review_group = Fabricate(:group)
-            review_category = Fabricate(:category, reviewable_by_group_id: review_group.id)
+            review_category = Fabricate(:category)
+            Fabricate(:category_moderation_group, category: review_category, group: review_group)
             @reply.topic.update!(category: review_category)
             review_group.users << review_user
           end
@@ -317,7 +318,7 @@ RSpec.describe PostDestroyer do
             end
 
             def changes_deleted_at_to_nil
-              PostDestroyer.new(Discourse.system_user, @reply).destroy
+              PostDestroyer.new(Discourse.system_user, @reply, context: "Automated testing").destroy
               @reply.reload
               expect(@reply.user_deleted).to eq(false)
               expect(@reply.deleted_at).not_to eq(nil)
@@ -547,12 +548,13 @@ RSpec.describe PostDestroyer do
     end
 
     context "when deleted by user with access to moderate topic category" do
-      fab!(:review_user) { Fabricate(:user) }
+      fab!(:review_user, :user)
 
       before do
         SiteSetting.enable_category_group_moderation = true
         review_group = Fabricate(:group)
-        review_category = Fabricate(:category, reviewable_by_group_id: review_group.id)
+        review_category = Fabricate(:category)
+        Fabricate(:category_moderation_group, category: review_category, group: review_group)
         post.topic.update!(category: review_category)
         review_group.users << review_user
       end
@@ -623,7 +625,7 @@ RSpec.describe PostDestroyer do
   end
 
   describe "private message" do
-    fab!(:author) { Fabricate(:user) }
+    fab!(:author, :user)
     fab!(:private_message) { Fabricate(:private_message_topic, user: author) }
     fab!(:first_post) { Fabricate(:post, topic: private_message, user: author) }
     fab!(:second_post) { Fabricate(:post, topic: private_message, user: author, post_number: 2) }
@@ -923,7 +925,7 @@ RSpec.describe PostDestroyer do
 
     it "should not send the flags_agreed_and_post_deleted message if it was deleted by system" do
       expect(ReviewableFlaggedPost.pending.count).to eq(1)
-      PostDestroyer.new(Discourse.system_user, second_post).destroy
+      PostDestroyer.new(Discourse.system_user, second_post, context: "Automated testing").destroy
       expect(Jobs::SendSystemMessage.jobs.size).to eq(0)
       expect(ReviewableFlaggedPost.pending.count).to eq(0)
     end
@@ -952,6 +954,29 @@ RSpec.describe PostDestroyer do
       expect(Jobs::SendSystemMessage.jobs.size).to eq(0)
       expect(ReviewableFlaggedPost.pending.count).to eq(0)
     end
+
+    context "when custom flags" do
+      fab!(:custom_flag) { Fabricate(:flag, name: "custom flag", notify_type: true) }
+      let(:third_post) { Fabricate(:post, topic_id: post.topic_id) }
+
+      it "should send message to user with correct translation" do
+        PostActionCreator.new(
+          moderator,
+          third_post,
+          custom_flag.id,
+          is_warning: false,
+          flag_topic: true,
+        ).perform
+        PostDestroyer.new(moderator, third_post, { reviewable: Reviewable.last }).destroy
+        jobs = Jobs::SendSystemMessage.jobs
+        expect(jobs.size).to eq(1)
+
+        Jobs::SendSystemMessage.new.execute(jobs[0]["args"][0].with_indifferent_access)
+
+        expect(Post.last.raw).to match("custom flag")
+        custom_flag.destroy!
+      end
+    end
   end
 
   describe "user actions" do
@@ -978,7 +1003,7 @@ RSpec.describe PostDestroyer do
   end
 
   describe "topic links" do
-    fab!(:first_post) { Fabricate(:post) }
+    fab!(:first_post, :post)
     let!(:topic) { first_post.topic }
     let!(:second_post) { Fabricate(:post_with_external_links, topic: topic) }
 
@@ -998,7 +1023,7 @@ RSpec.describe PostDestroyer do
   describe "internal links" do
     fab!(:topic)
     let!(:second_post) { Fabricate(:post, topic: topic) }
-    fab!(:other_topic) { Fabricate(:topic) }
+    fab!(:other_topic, :topic)
     let!(:other_post) { Fabricate(:post, topic: other_topic) }
     fab!(:user) { Fabricate(:user, refresh_auto_groups: true) }
     let!(:base_url) { URI.parse(Discourse.base_url) }
@@ -1040,7 +1065,7 @@ RSpec.describe PostDestroyer do
     end
 
     fab!(:post)
-    let(:reporter) { Discourse.system_user }
+    let(:reporter) { Fabricate(:moderator) }
     let(:reply) { Fabricate(:post, topic: post.topic) }
     let(:reviewable_reply) { PostActionCreator.off_topic(reporter, reply).reviewable }
 
@@ -1117,6 +1142,8 @@ RSpec.describe PostDestroyer do
     end
 
     it "destroys the post when force_destroy is true for soft deleted topics" do
+      Fabricate(:topic_web_hook)
+
       post = Fabricate(:post)
       topic = post.topic
 
@@ -1142,6 +1169,15 @@ RSpec.describe PostDestroyer do
       PostDestroyer.new(moderator, regular_post, force_destroy: true).destroy
       expect { regular_post.reload }.to raise_error(ActiveRecord::RecordNotFound)
       expect { topic.reload }.to raise_error(ActiveRecord::RecordNotFound)
+    end
+
+    it "destroys the post when force_destroy is true for posts by deleted users" do
+      regular_post = Fabricate(:post, post_number: 2)
+      UserDestroyer.new(admin).destroy(regular_post.user, delete_posts: true)
+      regular_post.reload
+
+      PostDestroyer.new(moderator, regular_post, force_destroy: true).destroy
+      expect { regular_post.reload }.to raise_error(ActiveRecord::RecordNotFound)
     end
   end
 
@@ -1239,6 +1275,48 @@ RSpec.describe PostDestroyer do
       post_1.reload
       expect_enqueued_with(job: :notify_mailing_list_subscribers, args: { post_id: post_1.id }) do
         PostDestroyer.new(admin, post_1).recover
+      end
+    end
+  end
+
+  describe "deleting a last reply" do
+    let!(:topic) { post.topic }
+    let!(:second_last_reply) do
+      freeze_time 1.day.from_now
+      create_post(topic:, user: coding_horror)
+    end
+    fab!(:user)
+    let!(:last_reply) do
+      freeze_time 2.days.from_now
+      create_post(topic:, user:)
+    end
+
+    context "when deleting by the creator" do
+      before { PostDestroyer.new(user, last_reply).destroy }
+
+      it "will reset the topic's bumped_at" do
+        topic.reload
+
+        expect(topic.bumped_at).to eq_time(second_last_reply.created_at)
+      end
+
+      it "still can see the post" do
+        last_reply.reload
+
+        expect(last_reply.deleted_at).to be_blank
+        expect(last_reply.deleted_by).to be_blank
+        expect(last_reply.user_deleted).to eq(true)
+        expect(last_reply.raw).to eq(I18n.t("js.post.deleted_by_author_simple"))
+      end
+    end
+
+    context "when deleting by a staff user" do
+      before { PostDestroyer.new(moderator, last_reply).destroy }
+
+      it "will reset the topic's bumped_at" do
+        topic.reload
+
+        expect(topic.bumped_at).to eq_time(second_last_reply.created_at)
       end
     end
   end

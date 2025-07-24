@@ -11,7 +11,7 @@ RSpec.describe UserBookmarkListSerializer do
       user_bookmark
     end
 
-    after { DiscoursePluginRegistry.reset! }
+    after { DiscoursePluginRegistry.reset_register!(:bookmarkables) }
 
     let(:post_bookmark) { Fabricate(:bookmark, user: user, bookmarkable: Fabricate(:post)) }
     let(:topic_bookmark) { Fabricate(:bookmark, user: user, bookmarkable: Fabricate(:topic)) }
@@ -28,6 +28,17 @@ RSpec.describe UserBookmarkListSerializer do
       expect(serializer.bookmarks.map(&:class).map(&:to_s)).to match_array(
         %w[UserTestBookmarkSerializer UserTopicBookmarkSerializer UserPostBookmarkSerializer],
       )
+    end
+
+    it "serializes categories" do
+      topic_category = Fabricate(:category)
+      topic_bookmark.bookmarkable.update!(category: topic_category)
+      post_category = Fabricate(:category)
+      post_bookmark.bookmarkable.topic.update!(category: post_category)
+
+      serializer = run_serializer
+
+      expect(serializer.categories).to contain_exactly(topic_category, post_category)
     end
   end
 end

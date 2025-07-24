@@ -4,30 +4,7 @@ class Admin::ReportsController < Admin::StaffController
   REPORTS_LIMIT = 50
 
   def index
-    reports_methods =
-      ["page_view_total_reqs"] +
-        ApplicationRequest
-          .req_types
-          .keys
-          .select { |r| r =~ /\Apage_view_/ && r !~ /mobile/ }
-          .map { |r| r + "_reqs" } +
-        Report.singleton_methods.grep(/\Areport_(?!about|storage_stats)/)
-
-    reports =
-      reports_methods.map do |name|
-        type = name.to_s.gsub("report_", "")
-        description = I18n.t("reports.#{type}.description", default: "")
-        description_link = I18n.t("reports.#{type}.description_link", default: "")
-
-        {
-          type: type,
-          title: I18n.t("reports.#{type}.title"),
-          description: description.presence ? description : nil,
-          description_link: description_link.presence ? description_link : nil,
-        }
-      end
-
-    render_json_dump(reports: reports.sort_by { |report| report[:title] })
+    render_json_dump(reports: Reports::ListQuery.call)
   end
 
   def bulk
@@ -39,6 +16,18 @@ class Admin::ReportsController < Admin::StaffController
 
         report = nil
         report = Report.find_cached(report_type, args) if (report_params[:cache])
+
+        if SiteSetting.use_legacy_pageviews
+          if Report::HIDDEN_PAGEVIEW_REPORTS.include?(report_type)
+            report = Report._get(report_type, args)
+            report.error = :not_found
+          end
+        else
+          if Report::HIDDEN_LEGACY_PAGEVIEW_REPORTS.include?(report_type)
+            report = Report._get(report_type, args)
+            report.error = :not_found
+          end
+        end
 
         if report
           reports << report
@@ -64,6 +53,12 @@ class Admin::ReportsController < Admin::StaffController
     report_type = params[:type]
 
     raise Discourse::NotFound unless report_type =~ /\A[a-z0-9\_]+\z/
+
+    if SiteSetting.use_legacy_pageviews
+      raise Discourse::NotFound if Report::HIDDEN_PAGEVIEW_REPORTS.include?(report_type)
+    else
+      raise Discourse::NotFound if Report::HIDDEN_LEGACY_PAGEVIEW_REPORTS.include?(report_type)
+    end
 
     args = parse_params(params)
 

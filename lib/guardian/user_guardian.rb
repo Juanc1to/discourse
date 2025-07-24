@@ -2,8 +2,8 @@
 
 # mixin for all Guardian methods dealing with user permissions
 module UserGuardian
-  def can_claim_reviewable_topic?(topic)
-    SiteSetting.reviewable_claiming != "disabled" && can_review_topic?(topic)
+  def can_claim_reviewable_topic?(topic, automatic = false)
+    (SiteSetting.reviewable_claiming != "disabled" || automatic) && can_review_topic?(topic)
   end
 
   def can_pick_avatar?(user_avatar, upload)
@@ -38,9 +38,10 @@ module UserGuardian
   end
 
   def can_edit_name?(user)
-    return false unless SiteSetting.enable_names?
     return false if SiteSetting.auth_overrides_name?
-    return true if is_staff?
+    return true if is_admin?
+    return false unless SiteSetting.enable_names?
+    return true if is_moderator?
     return false if is_anonymous?
     can_edit?(user)
   end
@@ -114,6 +115,11 @@ module UserGuardian
     user == @user || is_staff?
   end
 
+  def can_see_silencing_reason?(user)
+    return true unless SiteSetting.hide_silencing_reasons?
+    user == @user || is_staff?
+  end
+
   def can_disable_second_factor?(user)
     user && can_administer_user?(user)
   end
@@ -128,12 +134,25 @@ module UserGuardian
 
   def can_see_profile?(user)
     return false if user.blank?
-    return true if !SiteSetting.allow_users_to_hide_profile?
+    return true if is_me?(user) || is_staff?
 
-    # If a user has hidden their profile, restrict it to them and staff
-    return is_me?(user) || is_staff? if user.user_option.try(:hide_profile_and_presence?)
+    profile_hidden = SiteSetting.allow_users_to_hide_profile && user.user_option&.hide_profile?
 
-    true
+    return true if user.staff? && !profile_hidden
+
+    if SiteSetting.hide_new_user_profiles && !SiteSetting.invite_only &&
+         !SiteSetting.must_approve_users
+      if (user.user_stat.blank? || user.user_stat.post_count == 0) &&
+           !user.has_trust_level?(TrustLevel[2])
+        return false if anonymous? || !@user.has_trust_level?(TrustLevel[2])
+      end
+
+      if anonymous? || !@user.has_trust_level?(TrustLevel[1])
+        return user.has_trust_level?(TrustLevel[1]) && !profile_hidden
+      end
+    end
+
+    !profile_hidden
   end
 
   def can_see_user_actions?(user, action_types)
@@ -171,8 +190,13 @@ module UserGuardian
       (
         SiteSetting.enable_category_group_moderation &&
           Reviewable
-            .where(reviewable_by_group_id: @user.group_users.pluck(:group_id))
-            .where("category_id IS NULL or category_id IN (?)", allowed_category_ids)
+            .joins(
+              "INNER JOIN category_moderation_groups ON category_moderation_groups.category_id = reviewables.category_id",
+            )
+            .where(
+              category_id: allowed_category_ids,
+              "category_moderation_groups.group_id": @user.group_users.pluck(:group_id),
+            )
             .exists?
       )
   end
@@ -199,7 +223,19 @@ module UserGuardian
     SiteSetting.enable_discourse_connect && user && is_admin?
   end
 
+  def can_delete_user_associated_accounts?(user)
+    user && is_admin?
+  end
+
   def can_change_tracking_preferences?(user)
     (SiteSetting.allow_changing_staged_user_tracking || !user.staged) && can_edit_user?(user)
+  end
+
+  def can_create_theme?
+    return false if !is_admin?
+    # this modifier is used to further restrict theme creation, it's not
+    # possible to use this modifier to open up theme creation permissions (e.g.
+    # to non-admins)
+    DiscoursePluginRegistry.apply_modifier(:user_guardian_can_create_theme, true, self)
   end
 end

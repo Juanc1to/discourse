@@ -1,7 +1,7 @@
 # frozen_string_literal: true
 
 RSpec.describe "List channels | mobile", type: :system, mobile: true do
-  fab!(:current_user) { Fabricate(:user) }
+  fab!(:current_user, :user)
 
   let(:chat) { PageObjects::Pages::Chat.new }
   let(:topic_page) { PageObjects::Pages::Topic.new }
@@ -13,7 +13,7 @@ RSpec.describe "List channels | mobile", type: :system, mobile: true do
 
   context "when channels present" do
     context "when category channels" do
-      fab!(:category_channel_1) { Fabricate(:category_channel) }
+      fab!(:category_channel_1, :category_channel)
 
       it "doesn’t show the last message" do
         message =
@@ -122,7 +122,7 @@ RSpec.describe "List channels | mobile", type: :system, mobile: true do
 
     context "when direct message channels" do
       fab!(:dm_channel_1) { Fabricate(:direct_message_channel, users: [current_user]) }
-      fab!(:inaccessible_dm_channel_1) { Fabricate(:direct_message_channel) }
+      fab!(:inaccessible_dm_channel_1, :direct_message_channel)
 
       it "show the last message" do
         message =
@@ -155,10 +155,10 @@ RSpec.describe "List channels | mobile", type: :system, mobile: true do
   end
 
   context "when no category channels" do
-    it "hides the section" do
+    it "shows the empty channel list" do
       visit("/chat/channels")
 
-      expect(page).to have_no_css(".channels-list-container")
+      expect(page).to have_selector(".empty-state")
     end
 
     context "when user can create channels" do
@@ -198,6 +198,60 @@ RSpec.describe "List channels | mobile", type: :system, mobile: true do
       visit("/chat")
       expect(page).to have_no_css(".public-channels-section")
       expect(page).to have_no_css(".direct-message-channels-section")
+    end
+  end
+
+  context "when chat_preferred_index is set to direct_messages" do
+    before { SiteSetting.chat_preferred_index = "direct_messages" }
+
+    it "changes the default index" do
+      visit("/chat")
+
+      expect(page).to have_current_path("/chat/direct-messages")
+    end
+
+    context "when user can't use direct messages" do
+      before { SiteSetting.direct_message_enabled_groups = Group::AUTO_GROUPS[:staff] }
+
+      it "redirects to browse" do
+        visit("/chat")
+
+        expect(page).to have_current_path("/chat/browse/open")
+      end
+    end
+  end
+
+  context "when chat_preferred_index is not set" do
+    it "redirects to channels" do
+      visit("/chat")
+
+      expect(page).to have_current_path("/chat/channels")
+    end
+  end
+
+  context "when chat_preferred_index is set to my_threads" do
+    before do
+      SiteSetting.chat_threads_enabled = true
+      SiteSetting.chat_preferred_index = "my_threads"
+    end
+
+    it "redirects to threads" do
+      channel = Fabricate(:chat_channel, threading_enabled: true)
+      channel.add(current_user)
+
+      visit("/chat")
+
+      expect(page).to have_current_path("/chat/threads")
+    end
+
+    context "when no threads" do
+      before { SiteSetting.chat_threads_enabled = false }
+
+      it "redirects to browse" do
+        visit("/chat")
+
+        expect(page).to have_current_path("/chat/browse/open")
+      end
     end
   end
 

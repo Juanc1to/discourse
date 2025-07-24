@@ -45,7 +45,7 @@ module UserNotificationsHelper
         end
       end
 
-    return result unless result.blank?
+    return result if result.present?
 
     # If there is no first paragraph with text, return the first paragraph with
     # something else (an image) or div (a onebox).
@@ -66,7 +66,7 @@ module UserNotificationsHelper
   def show_username_on_post(post)
     return true unless SiteSetting.enable_names?
     return true unless SiteSetting.display_name_on_posts?
-    return true unless post.user.name.present?
+    return true if post.user.name.blank?
 
     normalize_name(post.user.name) != normalize_name(post.user.username)
   end
@@ -105,5 +105,13 @@ module UserNotificationsHelper
     URI(href).host.present? ? href : UrlHelper.absolute("#{Discourse.base_path}#{href}")
   rescue URI::Error
     href
+  end
+
+  def render_digest_header
+    if I18n.t("user_notifications.digest.custom.html.header").present?
+      return render("user_notifications/digest/custom_header")
+    end
+
+    render("user_notifications/digest/header")
   end
 end

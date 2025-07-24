@@ -8,7 +8,7 @@ class Upload < ActiveRecord::Base
 
   SHA1_LENGTH = 40
   SEEDED_ID_THRESHOLD = 0
-  URL_REGEX ||= %r{(/original/\dX[/\.\w]*/(\h+)[\.\w]*)}
+  URL_REGEX = %r{(/original/\dX[/\.\w]*/(\h+)[\.\w]*)}
   MAX_IDENTIFY_SECONDS = 5
   DOMINANT_COLOR_COMMAND_TIMEOUT_SECONDS = 5
 
@@ -23,10 +23,13 @@ class Upload < ActiveRecord::Base
 
   has_many :post_hotlinked_media, dependent: :destroy, class_name: "PostHotlinkedMedia"
   has_many :optimized_images, dependent: :destroy
+  has_many :optimized_videos, dependent: :destroy
+  has_many :optimized_video_uploads, through: :optimized_videos, source: :optimized_upload
   has_many :user_uploads, dependent: :destroy
   has_many :upload_references, dependent: :destroy
   has_many :posts, through: :upload_references, source: :target, source_type: "Post"
   has_many :topic_thumbnails
+  has_many :badges, foreign_key: :image_upload_id, dependent: :nullify
 
   attr_accessor :for_group_message
   attr_accessor :for_theme
@@ -57,8 +60,28 @@ class Upload < ActiveRecord::Base
 
   scope :by_users, -> { where("uploads.id > ?", SEEDED_ID_THRESHOLD) }
 
+  scope :without_s3_file_missing_confirmed_verification_status,
+        -> do
+          where.not(verification_status: Upload.verification_statuses[:s3_file_missing_confirmed])
+        end
+
+  scope :with_invalid_etag_verification_status,
+        -> { where(verification_status: Upload.verification_statuses[:invalid_etag]) }
+
   def self.verification_statuses
-    @verification_statuses ||= Enum.new(unchecked: 1, verified: 2, invalid_etag: 3)
+    @verification_statuses ||=
+      Enum.new(
+        unchecked: 1,
+        verified: 2,
+        invalid_etag: 3, # Used by S3Inventory to mark S3 Upload records that have an invalid ETag value compared to the ETag value of the inventory file
+        s3_file_missing_confirmed: 4, # Used by S3Inventory to skip S3 Upload records that are confirmed to not be backed by a file in the S3 file store
+      )
+  end
+
+  def self.mark_invalid_s3_uploads_as_missing
+    Upload.with_invalid_etag_verification_status.update_all(
+      verification_status: Upload.verification_statuses[:s3_file_missing_confirmed],
+    )
   end
 
   def self.add_unused_callback(&block)
@@ -472,15 +495,8 @@ class Upload < ActiveRecord::Base
     secure_status_did_change = self.secure? != mark_secure
     self.update(secure_params(mark_secure, reason, source))
 
-    if secure_status_did_change && SiteSetting.s3_use_acls && Discourse.store.external?
-      begin
-        Discourse.store.update_upload_ACL(self)
-      rescue Aws::S3::Errors::NotImplemented => err
-        Discourse.warn_exception(
-          err,
-          message: "The file store object storage provider does not support setting ACLs",
-        )
-      end
+    if secure_status_did_change && Discourse.store.external?
+      Discourse.store.update_upload_access_control(self)
     end
 
     secure_status_did_change
@@ -660,7 +676,7 @@ end
 #  created_at                   :datetime         not null
 #  updated_at                   :datetime         not null
 #  sha1                         :string(40)
-#  origin                       :string(1000)
+#  origin                       :string(2000)
 #  retain_hours                 :integer
 #  extension                    :string(10)
 #  thumbnail_width              :integer

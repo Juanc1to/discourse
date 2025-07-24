@@ -13,42 +13,36 @@ RSpec.describe Post do
 
   describe "#hidden_reasons" do
     context "when verifying enum sequence" do
-      before { @hidden_reasons = Post.hidden_reasons }
-
       it "'flag_threshold_reached' should be at 1st position" do
-        expect(@hidden_reasons[:flag_threshold_reached]).to eq(1)
+        expect(described_class.hidden_reasons[:flag_threshold_reached]).to eq(1)
       end
 
       it "'flagged_by_tl3_user' should be at 4th position" do
-        expect(@hidden_reasons[:flagged_by_tl3_user]).to eq(4)
+        expect(described_class.hidden_reasons[:flagged_by_tl3_user]).to eq(4)
       end
     end
   end
 
   describe "#types" do
     context "when verifying enum sequence" do
-      before { @types = Post.types }
-
       it "'regular' should be at 1st position" do
-        expect(@types[:regular]).to eq(1)
+        expect(described_class.types[:regular]).to eq(1)
       end
 
       it "'whisper' should be at 4th position" do
-        expect(@types[:whisper]).to eq(4)
+        expect(described_class.types[:whisper]).to eq(4)
       end
     end
   end
 
   describe "#cook_methods" do
     context "when verifying enum sequence" do
-      before { @cook_methods = Post.cook_methods }
-
       it "'regular' should be at 1st position" do
-        expect(@cook_methods[:regular]).to eq(1)
+        expect(described_class.cook_methods[:regular]).to eq(1)
       end
 
       it "'email' should be at 3rd position" do
-        expect(@cook_methods[:email]).to eq(3)
+        expect(described_class.cook_methods[:email]).to eq(3)
       end
     end
   end
@@ -148,12 +142,12 @@ RSpec.describe Post do
     end
   end
 
-  describe "with_secure_uploads?" do
+  describe "should_secure_uploads?" do
     let(:topic) { Fabricate(:topic) }
     let!(:post) { Fabricate(:post, topic: topic) }
 
     it "returns false if secure uploads is not enabled" do
-      expect(post.with_secure_uploads?).to eq(false)
+      expect(post.should_secure_uploads?).to eq(false)
     end
 
     context "when secure uploads is enabled" do
@@ -167,14 +161,14 @@ RSpec.describe Post do
         before { SiteSetting.login_required = true }
 
         it "returns true" do
-          expect(post.with_secure_uploads?).to eq(true)
+          expect(post.should_secure_uploads?).to eq(true)
         end
 
         context "if secure_uploads_pm_only" do
           before { SiteSetting.secure_uploads_pm_only = true }
 
           it "returns false" do
-            expect(post.with_secure_uploads?).to eq(false)
+            expect(post.should_secure_uploads?).to eq(false)
           end
         end
       end
@@ -184,7 +178,7 @@ RSpec.describe Post do
         before { topic.change_category_to_id(category.id) }
 
         it "returns true" do
-          expect(post.with_secure_uploads?).to eq(true)
+          expect(post.should_secure_uploads?).to eq(true)
         end
 
         context "when the topic is deleted" do
@@ -194,7 +188,7 @@ RSpec.describe Post do
           end
 
           it "returns true" do
-            expect(post.with_secure_uploads?).to eq(true)
+            expect(post.should_secure_uploads?).to eq(true)
           end
         end
 
@@ -202,7 +196,7 @@ RSpec.describe Post do
           before { SiteSetting.secure_uploads_pm_only = true }
 
           it "returns false" do
-            expect(post.with_secure_uploads?).to eq(false)
+            expect(post.should_secure_uploads?).to eq(false)
           end
         end
       end
@@ -211,14 +205,14 @@ RSpec.describe Post do
         let(:topic) { Fabricate(:private_message_topic) }
 
         it "returns true" do
-          expect(post.with_secure_uploads?).to eq(true)
+          expect(post.should_secure_uploads?).to eq(true)
         end
 
         context "when the topic is deleted" do
           before { topic.trash! }
 
           it "returns true" do
-            expect(post.with_secure_uploads?).to eq(true)
+            expect(post.should_secure_uploads?).to eq(true)
           end
         end
 
@@ -226,7 +220,7 @@ RSpec.describe Post do
           before { SiteSetting.secure_uploads_pm_only = true }
 
           it "returns true" do
-            expect(post.with_secure_uploads?).to eq(true)
+            expect(post.should_secure_uploads?).to eq(true)
           end
         end
       end
@@ -716,7 +710,7 @@ RSpec.describe Post do
           SiteSetting.max_mentions_per_post = 1
         end
 
-        it "allows vmax_mentions_per_post mentions" do
+        it "allows max_mentions_per_post mentions" do
           post_with_one_mention.user.trust_level = TrustLevel[1]
           expect(post_with_one_mention).to be_valid
         end
@@ -1027,20 +1021,6 @@ RSpec.describe Post do
     end
   end
 
-  describe "reply_history" do
-    let!(:p1) { Fabricate(:post, post_args) }
-    let!(:p2) { Fabricate(:post, post_args.merge(reply_to_post_number: p1.post_number)) }
-    let!(:p3) { Fabricate(:post, post_args) }
-    let!(:p4) { Fabricate(:post, post_args.merge(reply_to_post_number: p2.post_number)) }
-
-    it "returns the posts in reply to this post" do
-      expect(p4.reply_history).to eq([p1, p2])
-      expect(p4.reply_history(1)).to eq([p2])
-      expect(p3.reply_history).to be_blank
-      expect(p2.reply_history).to eq([p1])
-    end
-  end
-
   describe "reply_ids" do
     fab!(:topic)
     let!(:p1) { Fabricate(:post, topic: topic, post_number: 1) }
@@ -1168,20 +1148,30 @@ RSpec.describe Post do
       expect(post.cooked).to match(/noopener nofollow ugc/)
     end
 
-    it "passes the last_editor_id as the markdown user_id option" do
+    it "passes the last_editor_id as the markdown user_id option and post_id" do
       post.save
       post.reload
       PostAnalyzer
         .any_instance
         .expects(:cook)
-        .with(post.raw, { cook_method: Post.cook_methods[:regular], user_id: post.last_editor_id })
+        .with(
+          post.raw,
+          {
+            cook_method: Post.cook_methods[:regular],
+            user_id: post.last_editor_id,
+            post_id: post.id,
+          },
+        )
       post.cook(post.raw)
       user_editor = Fabricate(:user)
       post.update!(last_editor_id: user_editor.id)
       PostAnalyzer
         .any_instance
         .expects(:cook)
-        .with(post.raw, { cook_method: Post.cook_methods[:regular], user_id: user_editor.id })
+        .with(
+          post.raw,
+          { cook_method: Post.cook_methods[:regular], user_id: user_editor.id, post_id: post.id },
+        )
       post.cook(post.raw)
     end
 
@@ -1424,6 +1414,8 @@ RSpec.describe Post do
 
   describe "#set_owner" do
     fab!(:post)
+    fab!(:admin)
+    fab!(:new_user, :user)
 
     it "will change owner of a post correctly" do
       post.set_owner(coding_horror, Discourse.system_user)
@@ -1451,6 +1443,35 @@ RSpec.describe Post do
         I18n.with_locale(SiteSetting.default_locale) { I18n.t("change_owner.post_revision_text") }
 
       expect(post.edit_reason).to eq(expected_reason)
+    end
+
+    it "triggers a post_owner_changed event" do
+      original_user = post.user
+
+      events = DiscourseEvent.track_events { post.set_owner(new_user, admin) }
+
+      change_event = events.find { |e| e[:event_name] == :post_owner_changed }
+
+      expect(change_event).to be_present
+      expect(change_event[:params][0]).to eq(post)
+      expect(change_event[:params][1]).to eq(original_user)
+      expect(change_event[:params][2]).to eq(new_user)
+      expect(post.reload.user).to eq(new_user)
+    end
+
+    it "doesn't trigger an event when user remains the same" do
+      same_user = post.user
+
+      events = DiscourseEvent.track_events { post.set_owner(same_user, admin) }
+
+      change_event = events.find { |e| e[:event_name] == :post_owner_changed }
+
+      expect(change_event).to be_nil
+    end
+
+    it "returns true when ownership changes successfully" do
+      result = post.set_owner(new_user, admin)
+      expect(result).to eq(true)
     end
   end
 
@@ -1502,6 +1523,19 @@ RSpec.describe Post do
       ).to(true)
     end
 
+    it "should inform the user when custom flag" do
+      custom_flag = Fabricate(:flag, name: "custom flag")
+      post.hide!(PostActionType.types[:custom_custom_flag])
+
+      jobs = Jobs::SendSystemMessage.jobs
+      expect(jobs.size).to eq(1)
+
+      Jobs::SendSystemMessage.new.execute(jobs[0]["args"][0].with_indifferent_access)
+      expect(Post.last.raw).to match("custom flag")
+
+      custom_flag.destroy!
+    end
+
     it "should decrease user_stat topic_count for first post" do
       expect do post.hide!(PostActionType.types[:off_topic]) end.to change {
         post.user.user_stat.reload.topic_count
@@ -1514,6 +1548,16 @@ RSpec.describe Post do
       expect do post_2.hide!(PostActionType.types[:off_topic]) end.to change {
         post_2.user.user_stat.reload.post_count
       }.from(1).to(0)
+    end
+
+    it "changes topic visible status to false if it is the first post" do
+      t = post.topic
+      expect(t.visible).to eq(true)
+
+      post.hide!(PostActionType.types[:off_topic])
+
+      t.reload
+      expect(t.visible).to eq(false)
     end
   end
 
@@ -1540,6 +1584,25 @@ RSpec.describe Post do
 
       expect(post.hidden).to eq(false)
       expect(hidden_topic.visible).to eq(true)
+      expect(hidden_topic.visibility_reason_id).to eq(Topic.visibility_reasons[:op_unhidden])
+    end
+
+    it "will not unhide the topic if the topic visibility_reason_id is not op_flag_threshold_reached" do
+      hidden_topic =
+        Fabricate(
+          :topic,
+          visible: false,
+          visibility_reason_id: Topic.visibility_reasons[:manually_unlisted],
+        )
+      post = create_post(topic: hidden_topic)
+      post.update_columns(hidden: true, hidden_at: Time.now, hidden_reason_id: 1)
+      post.reload
+
+      expect(post.hidden).to eq(true)
+      post.unhide!
+
+      hidden_topic.reload
+      expect(hidden_topic.visible).to eq(false)
     end
 
     it "should increase user_stat topic_count for first post" do
@@ -1584,8 +1647,8 @@ RSpec.describe Post do
 
   describe "video_thumbnails" do
     fab!(:video_upload) { Fabricate(:upload, extension: "mp4") }
-    fab!(:image_upload) { Fabricate(:upload) }
-    fab!(:image_upload_2) { Fabricate(:upload) }
+    fab!(:image_upload, :upload)
+    fab!(:image_upload_2, :upload)
     let(:base_url) { "#{Discourse.base_url_no_prefix}#{Discourse.base_path}" }
     let(:video_url) { "#{base_url}#{video_upload.url}" }
 
@@ -1657,10 +1720,10 @@ RSpec.describe Post do
   describe "uploads" do
     fab!(:video_upload) { Fabricate(:upload, extension: "mp4") }
     fab!(:video_upload_2) { Fabricate(:upload, extension: "mp4") }
-    fab!(:image_upload) { Fabricate(:upload) }
+    fab!(:image_upload, :upload)
     fab!(:audio_upload) { Fabricate(:upload, extension: "ogg") }
     fab!(:attachment_upload) { Fabricate(:upload, extension: "csv") }
-    fab!(:attachment_upload_2) { Fabricate(:upload) }
+    fab!(:attachment_upload_2, :upload)
     fab!(:attachment_upload_3) { Fabricate(:upload, extension: nil) }
 
     let(:base_url) { "#{Discourse.base_url_no_prefix}#{Discourse.base_path}" }
@@ -1701,10 +1764,10 @@ RSpec.describe Post do
       post.link_post_uploads
 
       post.trash!
-      expect(UploadReference.count).to eq(7)
+      expect(UploadReference.where(target_type: "Post").count).to eq(7)
 
       post.destroy!
-      expect(UploadReference.count).to eq(0)
+      expect(UploadReference.where(target_type: "Post").count).to eq(0)
     end
 
     describe "#link_post_uploads" do
@@ -1880,9 +1943,13 @@ RSpec.describe Post do
           create_post(topic_id: topic.id, post_type: Post.types[:whisper])
         end
 
-      updates_topic_updated_at { PostDestroyer.new(Discourse.system_user, post).destroy }
+      updates_topic_updated_at do
+        PostDestroyer.new(Discourse.system_user, post, context: "Automated testing").destroy
+      end
 
-      updates_topic_updated_at { PostDestroyer.new(Discourse.system_user, post).recover }
+      updates_topic_updated_at do
+        PostDestroyer.new(Discourse.system_user, post, context: "Automated testing").recover
+      end
     end
   end
 
@@ -2068,6 +2135,25 @@ RSpec.describe Post do
       expect(urls).to be_empty
     end
 
+    it "should skip external URLs following the `/uploads/short-url` pattern if a host is present and the host is not the configured host" do
+      upload = Fabricate(:upload)
+
+      raw = <<~RAW
+      [Upload link with Discourse.base_url](#{Discourse.base_url}/uploads/short-url/#{upload.sha1}.#{upload.extension})
+      [Upload link without Discourse.base_url](https://some.other.host/uploads/short-url/#{upload.sha1}.#{upload.extension})
+      [Upload link without host](/uploads/short-url/#{upload.sha1}.#{upload.extension})
+      RAW
+
+      post = Fabricate(:post, raw: raw)
+      urls = []
+      post.each_upload_url { |src, _, _| urls << src }
+
+      expect(urls).to contain_exactly(
+        "#{Discourse.base_url}/uploads/short-url/#{upload.sha1}.#{upload.extension}",
+        "/uploads/short-url/#{upload.sha1}.#{upload.extension}",
+      )
+    end
+
     it "skip S3 cdn urls with different path" do
       setup_s3
       SiteSetting.Upload.stubs(:s3_cdn_url).returns("https://cdn.example.com/site1")
@@ -2084,8 +2170,8 @@ RSpec.describe Post do
   end
 
   describe "#publish_changes_to_client!" do
-    fab!(:user1) { Fabricate(:user) }
-    fab!(:user3) { Fabricate(:user) }
+    fab!(:user1, :user)
+    fab!(:user3, :user)
     fab!(:topic) { Fabricate(:private_message_topic, user: user1) }
     fab!(:post) { Fabricate(:post, topic: topic) }
     fab!(:group_user) { Fabricate(:group_user, user: user3) }
@@ -2200,9 +2286,20 @@ RSpec.describe Post do
     end
   end
 
+  describe "full_url" do
+    it "returns the correct post url with subfolder install" do
+      set_subfolder "/forum"
+      post = Fabricate(:post)
+
+      expect(post.full_url).to eq(
+        "#{Discourse.base_url_no_prefix}/forum/t/#{post.topic.slug}/#{post.topic.id}/#{post.post_number}",
+      )
+    end
+  end
+
   describe "public_posts_count_per_day" do
     before do
-      freeze_time DateTime.parse("2017-03-01 12:00")
+      freeze_time_safe
 
       Fabricate(:post)
       Fabricate(:post, created_at: 1.day.ago)
@@ -2271,6 +2368,75 @@ RSpec.describe Post do
       expect(
         Post.public_posts_count_per_day(10.days.ago, 5.days.ago, nil, false, [group.id]),
       ).to eq(6.days.ago.to_date => 1, 7.days.ago.to_date => 1)
+    end
+  end
+
+  describe "#has_localization?" do
+    it "returns true if the post has localization" do
+      post = Fabricate(:post)
+      Fabricate(:post_localization, post: post, locale: "zh_CN")
+
+      expect(post.has_localization?(:zh_CN)).to eq(true)
+      expect(post.has_localization?(:"zh_CN")).to eq(true)
+      expect(post.has_localization?("zh-CN")).to eq(true)
+
+      expect(post.has_localization?("z")).to eq(false)
+    end
+  end
+
+  describe "#get_localization" do
+    it "returns the localization with the specified locale" do
+      I18n.locale = "ja"
+      post = Fabricate(:post)
+      zh_localization = Fabricate(:post_localization, post: post, locale: "zh_CN")
+      Fabricate(:post_localization, post: post, locale: "ja_JP")
+      ja_localization = Fabricate(:post_localization, post: post, locale: "ja")
+
+      expect(post.get_localization(:zh_CN)).to eq(zh_localization)
+      expect(post.get_localization("zh-CN")).to eq(zh_localization)
+      expect(post.get_localization("xx")).to eq(nil)
+      expect(post.get_localization).to eq(ja_localization)
+    end
+
+    it "returns a regional localization (ja_JP) when the user's locale (ja) is not available" do
+      I18n.locale = "ja"
+      post = Fabricate(:post)
+      ja_jp_localization = Fabricate(:post_localization, post: post, locale: "ja_JP")
+
+      expect(post.get_localization).to eq(ja_jp_localization)
+    end
+
+    it "returns a normalized localization (pt) if the user's locale (pt_BR) is not available" do
+      I18n.locale = "pt_BR"
+      post = Fabricate(:post)
+      pt_localization = Fabricate(:post_localization, post: post, locale: "pt")
+
+      expect(post.get_localization).to eq(pt_localization)
+    end
+  end
+
+  describe "#in_user_locale?" do
+    it "returns true if the post has localization in the user's locale" do
+      I18n.locale = "ja"
+      post = Fabricate(:post, locale: "ja")
+
+      expect(post.in_user_locale?).to eq(true)
+      post.update!(locale: "ja_JP")
+      expect(post.in_user_locale?).to eq(true)
+
+      post.update!(locale: "es")
+      expect(post.in_user_locale?).to eq(false)
+    end
+  end
+
+  describe "#before_save" do
+    it "replaces empty locales with nil" do
+      post = Fabricate(:post, locale: "en")
+
+      post.locale = ""
+      post.save!
+
+      expect(post.reload.locale).to eq(nil)
     end
   end
 end

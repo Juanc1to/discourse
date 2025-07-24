@@ -82,11 +82,12 @@ class RemoteTheme < ActiveRecord::Base
     )
   end
 
-  # This is only used in the development and test environment and is currently not supported for other environments
-  if Rails.env.test? || Rails.env.development?
-    def self.import_theme_from_directory(directory)
-      update_theme(ThemeStore::DirectoryImporter.new(directory))
-    end
+  def self.import_theme_from_directory(directory, theme_id: nil)
+    update_theme(
+      ThemeStore::DirectoryImporter.new(directory),
+      update_components: "none",
+      theme_id: theme_id,
+    )
   end
 
   def self.update_theme(
@@ -103,12 +104,19 @@ class RemoteTheme < ActiveRecord::Base
 
     existing = true
     if theme.blank?
-      theme = Theme.new(user_id: user&.id || -1, name: theme_info["name"], auto_update: false)
+      theme =
+        Theme.new(
+          id: theme_id,
+          user_id: user&.id || -1,
+          name: theme_info["name"],
+          auto_update: false,
+        )
       existing = false
     end
 
     theme.component = theme_info["component"].to_s == "true"
     theme.child_components = child_components = theme_info["components"].presence || []
+    theme.skip_child_components_update = true if update_components == "none"
 
     remote_theme = new
     remote_theme.theme = theme
@@ -249,15 +257,7 @@ class RemoteTheme < ActiveRecord::Base
 
     theme_info["assets"]&.each do |name, relative_path|
       if path = importer.real_path(relative_path)
-        new_path = "#{File.dirname(path)}/#{SecureRandom.hex}#{File.extname(path)}"
-        File.rename(path, new_path) # OptimizedImage has strict file name restrictions, so rename temporarily
-        upload =
-          UploadCreator.new(
-            File.open(new_path),
-            File.basename(relative_path),
-            for_theme: true,
-          ).create_for(theme.user_id)
-
+        upload = RemoteTheme.create_upload(theme: theme, path: path, relative_path: relative_path)
         if !upload.errors.empty?
           raise ImportError,
                 I18n.t(
@@ -274,6 +274,17 @@ class RemoteTheme < ActiveRecord::Base
           upload_id: upload.id,
         )
       end
+    end
+
+    begin
+      updated_fields.concat(
+        ThemeScreenshotsHandler.new(theme).parse_screenshots_as_theme_fields!(
+          theme_info["screenshots"],
+          importer,
+        ),
+      )
+    rescue ThemeScreenshotsHandler::ThemeScreenshotError => err
+      raise ImportError, err.message
     end
 
     # Update all theme attributes if this is just a placeholder
@@ -296,10 +307,12 @@ class RemoteTheme < ActiveRecord::Base
     end
 
     ThemeModifierSet.modifiers.keys.each do |modifier_name|
-      theme.theme_modifier_set.public_send(
-        :"#{modifier_name}=",
-        theme_info.dig("modifiers", modifier_name.to_s),
-      )
+      value = theme_info.dig("modifiers", modifier_name.to_s)
+      if Hash === value && value["type"] == "setting"
+        theme.theme_modifier_set.add_theme_setting_modifier(modifier_name, value["value"])
+      else
+        theme.theme_modifier_set.public_send(:"#{modifier_name}=", value)
+      end
     end
 
     if !theme.theme_modifier_set.valid?
@@ -358,7 +371,7 @@ class RemoteTheme < ActiveRecord::Base
       self.commits_behind = 0
     end
 
-    transaction_block = -> do
+    transaction_block = ->(*) do
       # Destroy fields that no longer exist in the remote theme
       field_ids_to_destroy = theme.theme_fields.pluck(:id) - updated_fields.map { |tf| tf&.id }
       ThemeField.where(id: field_ids_to_destroy).destroy_all
@@ -373,6 +386,8 @@ class RemoteTheme < ActiveRecord::Base
         raise ActiveRecord::Rollback if !theme.save
       end
 
+      create_theme_site_settings(theme, theme_info["theme_site_settings"])
+
       theme.migrate_settings(start_transaction: false) if run_migrations
     end
 
@@ -381,6 +396,8 @@ class RemoteTheme < ActiveRecord::Base
     else
       self.transaction(&transaction_block)
     end
+
+    theme.theme_modifier_set.save! if theme.theme_modifier_set.refresh_theme_setting_modifiers
 
     self
   ensure
@@ -442,6 +459,37 @@ class RemoteTheme < ActiveRecord::Base
     theme.color_scheme = ordered_schemes.first if theme.new_record?
   end
 
+  def create_theme_site_settings(theme, theme_site_settings)
+    theme_site_settings ||= {}
+
+    existing_theme_site_settings =
+      theme.theme_site_settings.where(name: theme_site_settings.keys).to_a
+    theme_site_settings.each do |setting, value|
+      next if !SiteSetting.themeable[setting.to_sym]
+
+      # If there is an existing theme site setting, then don't touch it,
+      # we don't want to mess with site owner's changes.
+      existing_theme_site_setting =
+        existing_theme_site_settings.find do |theme_site_setting|
+          theme_site_setting.name == setting
+        end
+      next if existing_theme_site_setting.present?
+
+      # The manager handles creating the theme site setting record
+      # if it does not exist.
+      Themes::ThemeSiteSettingManager.call(
+        params: {
+          theme_id: theme.id,
+          name: setting,
+          value: value,
+        },
+        guardian: Discourse.system_user.guardian,
+      ) { |result| }
+    end
+
+    SiteSetting.refresh!(refresh_site_settings: false, refresh_theme_site_settings: true)
+  end
+
   def github_diff_link
     if github_repo_url.present? && local_version != remote_version
       "#{github_repo_url.gsub(/\.git\z/, "")}/compare/#{local_version}...#{remote_version}"
@@ -460,6 +508,20 @@ class RemoteTheme < ActiveRecord::Base
 
   def is_git?
     remote_url.present?
+  end
+
+  def self.create_upload(theme:, path:, relative_path:, skip_validations: false)
+    new_path = "#{File.dirname(path)}/#{SecureRandom.hex}#{File.extname(path)}"
+
+    # OptimizedImage has strict file name restrictions, so rename temporarily
+    File.rename(path, new_path)
+
+    UploadCreator.new(
+      File.open(new_path),
+      File.basename(relative_path),
+      for_theme: true,
+      skip_validations: skip_validations,
+    ).create_for(theme.user_id)
   end
 end
 

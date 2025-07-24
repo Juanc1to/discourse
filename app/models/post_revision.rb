@@ -4,7 +4,7 @@ class PostRevision < ActiveRecord::Base
   belongs_to :post
   belongs_to :user
 
-  serialize :modifications, Hash
+  serialize :modifications, type: Hash, coder: YAML
 
   after_create :create_notification
 
@@ -26,6 +26,12 @@ class PostRevision < ActiveRecord::Base
        WHERE version <> 1 + (SELECT COUNT(*) FROM post_revisions WHERE post_id = posts.id)
           OR public_version <> 1 + (SELECT COUNT(*) FROM post_revisions pr WHERE post_id = posts.id AND pr.hidden = 'f')
     SQL
+  end
+
+  def categories
+    return [] if modifications["category_id"].blank?
+
+    @categories ||= Category.with_parents(modifications["category_id"])
   end
 
   def hide!
@@ -57,16 +63,17 @@ end
 # Table name: post_revisions
 #
 #  id            :integer          not null, primary key
-#  user_id       :integer
-#  post_id       :integer
+#  hidden        :boolean          default(FALSE), not null
 #  modifications :text
 #  number        :integer
 #  created_at    :datetime         not null
 #  updated_at    :datetime         not null
-#  hidden        :boolean          default(FALSE), not null
+#  post_id       :integer
+#  user_id       :integer
 #
 # Indexes
 #
 #  index_post_revisions_on_post_id             (post_id)
 #  index_post_revisions_on_post_id_and_number  (post_id,number)
 #  index_post_revisions_on_user_id             (user_id)
+#

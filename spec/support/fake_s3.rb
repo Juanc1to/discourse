@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require "aws-sdk-s3"
+
 class FakeS3
   attr_reader :s3_client
 
@@ -118,7 +120,7 @@ class FakeS3
         log_operation(context)
 
         find_bucket(context.params)&.delete_object(context.params[:key])
-        nil
+        { delete_marker: true }
       end,
     )
 
